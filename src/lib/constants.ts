@@ -1,6 +1,7 @@
 import {
   LayoutDashboard,
   GitFork,
+  MessageSquare,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -25,6 +26,11 @@ export const NAV_ITEMS: NavItem[] = [
     label: "Repositories",
     href: "/dashboard/repositories",
     icon: GitFork,
+  },
+  {
+    label: "Chat",
+    href: "/dashboard/chat",
+    icon: MessageSquare,
   },
   {
     label: "Settings",

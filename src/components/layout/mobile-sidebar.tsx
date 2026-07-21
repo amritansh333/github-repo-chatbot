@@ -87,7 +87,7 @@ export function MobileSidebar() {
         </nav>
 
         <div className="absolute bottom-0 left-0 right-0 px-4 py-3 border-t border-[var(--sidebar-border)]">
-          <p className="text-xs text-[var(--muted-foreground)]">Sprint 2 — Repository Management</p>
+          <p className="text-xs text-[var(--muted-foreground)]">Sprint 3 — AI Chat</p>
         </div>
       </SheetContent>
     </Sheet>

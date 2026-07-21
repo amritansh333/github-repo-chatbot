@@ -1,6 +1,6 @@
 {
   "name": "github-repo-chatbot",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
@@ -27,7 +27,11 @@
     "@radix-ui/react-avatar": "^1.1.10",
     "@radix-ui/react-scroll-area": "^1.2.9",
     "zustand": "^5.0.5",
-    "date-fns": "^4.1.0"
+    "date-fns": "^4.1.0",
+    "@google/genai": "^2.12.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "highlight.js": "^11.11.1"
   },
   "devDependencies": {
     "typescript": "^5",

@@ -13,7 +13,7 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden md:flex flex-col w-[var(--sidebar-width,240px)] shrink-0 border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] h-screen sticky top-0">
+    <aside className="hidden md:flex flex-col w-[var(--sidebar-width,240px)] shrink-0 border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] h-screen sticky top-0 z-30">
       {/* Logo */}
       <div className="flex items-center gap-2.5 px-4 h-16">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-blue-600 shadow-sm">
@@ -73,7 +73,7 @@ export function Sidebar() {
       <Separator />
 
       <div className="px-4 py-3">
-        <p className="text-xs text-[var(--muted-foreground)]">Sprint 2 — Repository Management</p>
+        <p className="text-xs text-[var(--muted-foreground)]">Sprint 3 — AI Chat</p>
       </div>
     </aside>
   );
