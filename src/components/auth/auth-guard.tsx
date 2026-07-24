@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/store/auth";
 import { Skeleton } from "@/components/ui/skeleton";
 
 interface AuthGuardProps {
@@ -10,19 +10,16 @@ interface AuthGuardProps {
 }
 
 export function AuthGuard({ children }: AuthGuardProps) {
-  const { isAuthenticated } = useAuthStore();
+  const { status } = useSession();
   const router = useRouter();
-  const [checked, setChecked] = React.useState(false);
 
   React.useEffect(() => {
-    // After hydration, check auth state
-    setChecked(true);
-    if (!isAuthenticated) {
-      router.replace("/");
+    if (status === "unauthenticated") {
+      router.replace("/auth/signin");
     }
-  }, [isAuthenticated, router]);
+  }, [status, router]);
 
-  if (!checked) {
+  if (status === "loading") {
     return (
       <div className="flex flex-col gap-4 p-6">
         <Skeleton className="h-8 w-48" />
@@ -36,7 +33,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
     );
   }
 
-  if (!isAuthenticated) return null;
+  if (status === "unauthenticated") return null;
 
   return <>{children}</>;
 }

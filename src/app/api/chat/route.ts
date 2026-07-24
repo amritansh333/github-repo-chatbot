@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
+import { auth } from "../../../../auth";
+import { db } from "@/db";
+import { users, userSettings, conversations } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { decryptToken } from "@/lib/encryption";
 import { buildRepoContext } from "@/lib/repo-context";
 import type { ChatMessage } from "@/types/chat";
 
@@ -18,7 +23,6 @@ export interface ChatRequestBody {
   repoBranch: string;
   repoLanguage: string | null;
   repoPrivate: boolean;
-  githubToken: string;
   conversationId: string;
 }
 
@@ -30,12 +34,18 @@ function validateBody(body: unknown): body is ChatRequestBody {
     typeof b.repoOwner === "string" &&
     typeof b.repoName === "string" &&
     typeof b.repoBranch === "string" &&
-    typeof b.githubToken === "string" &&
     typeof b.conversationId === "string"
   );
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
+  // Auth check
+  const session = await auth();
+  if (!session?.user?.id) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Validate Gemini config
   let ai: GoogleGenAI;
   try {
     ai = getGeminiClient();
@@ -46,6 +56,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
+  // Parse + validate body
   let body: unknown;
   try {
     body = await req.json();
@@ -63,22 +74,58 @@ export async function POST(req: NextRequest): Promise<Response> {
     repoName,
     repoBranch,
     repoLanguage,
-    githubToken,
-    conversationId: _conversationId,
+    conversationId,
   } = body;
+
+  // Verify the conversation belongs to this user
+  const conv = await db.query.conversations.findFirst({
+    where: eq(conversations.id, conversationId),
+    columns: { userId: true },
+  });
+  if (!conv || conv.userId !== session.user.id) {
+    return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
+  }
+
+  // Fetch encrypted GitHub token from DB
+  const user = await db.query.users.findFirst({
+    where: eq(users.id, session.user.id),
+    columns: { githubAccessToken: true },
+  });
+
+  if (!user?.githubAccessToken) {
+    return NextResponse.json(
+      { error: "No GitHub token found. Please add your GitHub Personal Access Token in Settings." },
+      { status: 422 }
+    );
+  }
+
+  let githubToken: string;
+  try {
+    githubToken = await decryptToken(user.githubAccessToken);
+  } catch {
+    return NextResponse.json(
+      { error: "Failed to decrypt GitHub token. Please re-add your token in Settings." },
+      { status: 500 }
+    );
+  }
+
+  // Fetch user's preferred AI model
+  const settings = await db.query.userSettings.findFirst({
+    where: eq(userSettings.userId, session.user.id),
+    columns: { aiModel: true },
+  });
+  const model = settings?.aiModel ?? "gemini-2.5-flash";
 
   const userMessages = messages.filter(
     (m) => m.role === "user" || m.role === "assistant"
   );
-  const lastUserMessage = [...userMessages]
-    .reverse()
-    .find((m) => m.role === "user");
+  const lastUserMessage = [...userMessages].reverse().find((m) => m.role === "user");
 
   if (!lastUserMessage) {
     return NextResponse.json({ error: "No user message found." }, { status: 400 });
   }
 
-  // Build repo context server-side using the GitHub token
+  // Build repo context server-side
   let repoContext: Awaited<ReturnType<typeof buildRepoContext>>;
   try {
     repoContext = await buildRepoContext(
@@ -107,9 +154,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     repoContext
   );
 
-  // Map conversation history to Gemini Content format.
-  // Gemini uses "user" / "model" roles (not "assistant").
-  // The system instruction is passed separately via config, so we exclude it here.
   const contents = userMessages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
@@ -121,12 +165,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     async start(controller) {
       try {
         const result = await ai.models.generateContentStream({
-          model: process.env.GEMINI_MODEL || "gemini-3-flash-preview",
+          model,
           contents,
           config: {
             systemInstruction,
             temperature: 0.3,
-            maxOutputTokens: 2048,
+            maxOutputTokens: 8192,
           },
         });
 
@@ -142,13 +186,10 @@ export async function POST(req: NextRequest): Promise<Response> {
         }
 
         controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({ type: "done" })}\n\n`
-          )
+          encoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`)
         );
       } catch (err) {
-        const msg =
-          err instanceof Error ? err.message : "AI generation failed.";
+        const msg = err instanceof Error ? err.message : "AI generation failed.";
         controller.enqueue(
           encoder.encode(
             `data: ${JSON.stringify({ type: "error", error: msg })}\n\n`

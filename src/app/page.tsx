@@ -1,11 +1,9 @@
-"use client";
-
-import * as React from "react";
-import { useRouter } from "next/navigation";
-import { useAuthStore } from "@/store/auth";
-import { TokenLoginForm } from "@/components/auth/token-login-form";
+import Link from "next/link";
+import { auth } from "../../auth";
+import { redirect } from "next/navigation";
+import { GitBranch, Zap, Search, MessageSquare, ArrowRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { GitBranch, Zap, Search, MessageSquare } from "lucide-react";
 import { APP_NAME } from "@/lib/constants";
 
 const FEATURES = [
@@ -24,7 +22,7 @@ const FEATURES = [
   {
     icon: MessageSquare,
     title: "Chat with your code",
-    description: "Ask questions about any repository in natural language. Coming in Sprint 3.",
+    description: "Ask questions about any repository in natural language with Gemini AI.",
     color: "#8b5cf6",
   },
   {
@@ -35,17 +33,12 @@ const FEATURES = [
   },
 ];
 
-export default function LandingPage() {
-  const { isAuthenticated } = useAuthStore();
-  const router = useRouter();
-
-  React.useEffect(() => {
-    if (isAuthenticated) router.replace("/dashboard");
-  }, [isAuthenticated, router]);
+export default async function LandingPage() {
+  const session = await auth();
+  if (session?.user) redirect("/dashboard");
 
   return (
     <div className="min-h-screen bg-[var(--background)] flex flex-col">
-      {/* Top bar */}
       <header className="sticky top-0 z-50 border-b border-[var(--border)] bg-[var(--background)]/80 backdrop-blur-md">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
@@ -56,55 +49,42 @@ export default function LandingPage() {
               {APP_NAME}
             </span>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            <Button asChild size="sm">
+              <Link href="/auth/signin">Sign in</Link>
+            </Button>
+          </div>
         </div>
       </header>
 
       <main className="flex-1">
-        {/* Hero — two column */}
-        <section className="max-w-6xl mx-auto px-4 sm:px-6 py-16 sm:py-24">
-          <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
-            {/* Left: copy */}
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/40 px-3 py-1 text-xs font-medium text-violet-700 dark:text-violet-300 mb-6">
-                <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
-                Sprint 2 · Repository management
-              </div>
-              <h1 className="text-4xl sm:text-5xl font-bold tracking-tight text-[var(--foreground)] mb-5 leading-[1.1]">
-                Chat with any{" "}
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-blue-600">
-                  GitHub
-                </span>{" "}
-                repository
-              </h1>
-              <p className="text-base text-[var(--muted-foreground)] leading-relaxed mb-6 max-w-lg">
-                Connect your GitHub account, explore all your repositories, and
-                get ready for AI-powered code conversations.
-              </p>
-
-              {/* Features list */}
-              <ul className="space-y-3 mb-8">
-                {["Browse all your GitHub repositories", "Search, filter and sort by any criteria", "View branches, commits, and language breakdown"].map((feat) => (
-                  <li key={feat} className="flex items-center gap-2.5 text-sm text-[var(--muted-foreground)]">
-                    <span className="h-5 w-5 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center shrink-0">
-                      <svg viewBox="0 0 12 12" className="h-3 w-3 text-green-600 dark:text-green-400">
-                        <path d="M2 6l2.5 2.5L10 3.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </span>
-                    {feat}
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            {/* Right: login form */}
-            <div>
-              <TokenLoginForm />
-            </div>
+        <section className="max-w-6xl mx-auto px-4 sm:px-6 py-20 sm:py-32 text-center">
+          <div className="inline-flex items-center gap-2 rounded-full border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/40 px-3 py-1 text-xs font-medium text-violet-700 dark:text-violet-300 mb-8">
+            <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
+            Sprint 5 · SaaS with Auth & Database
+          </div>
+          <h1 className="text-4xl sm:text-6xl font-bold tracking-tight text-[var(--foreground)] mb-6 leading-[1.1]">
+            Chat with any{" "}
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-600 to-blue-600">
+              GitHub
+            </span>{" "}
+            repository
+          </h1>
+          <p className="max-w-xl mx-auto text-base text-[var(--muted-foreground)] leading-relaxed mb-10">
+            Sign in with GitHub or Google. RepoChat uses Gemini AI to help you
+            understand any codebase through natural conversation.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <Button asChild size="lg" className="gap-2">
+              <Link href="/auth/signin">
+                Get started free
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
           </div>
         </section>
 
-        {/* Features */}
         <section className="border-t border-[var(--border)] bg-[var(--muted)]/30">
           <div className="max-w-6xl mx-auto px-4 sm:px-6 py-16">
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -141,7 +121,7 @@ export default function LandingPage() {
             © {new Date().getFullYear()} {APP_NAME}
           </p>
           <p className="text-xs text-[var(--muted-foreground)]">
-            Built with Next.js 16
+            Built with Next.js 16 · Gemini 2.5 Flash
           </p>
         </div>
       </footer>

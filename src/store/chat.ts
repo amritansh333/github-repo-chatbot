@@ -5,8 +5,8 @@ import { persist } from "zustand/middleware";
 import type { Conversation, ChatMessage } from "@/types/chat";
 import type { GitHubRepo } from "@/types/github";
 
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+function generateLocalId(): string {
+  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
 function generateTitle(firstMessage: string): string {
@@ -15,9 +15,11 @@ function generateTitle(firstMessage: string): string {
 }
 
 interface ChatState {
+  // Conversations loaded from DB — indexed by id
   conversations: Conversation[];
   activeConversationId: string | null;
   selectedRepo: GitHubRepo | null;
+  // UI-only state (persisted locally)
   sidebarOpen: boolean;
 
   // Repo selection
@@ -27,14 +29,13 @@ interface ChatState {
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
 
-  // Conversation CRUD
-  createConversation: (repo: GitHubRepo, firstMessage?: string) => string;
+  // Conversations (synced with DB externally via hooks)
+  setConversations: (conversations: Conversation[]) => void;
   setActiveConversation: (id: string | null) => void;
-  renameConversation: (id: string, title: string) => void;
-  deleteConversation: (id: string) => void;
-  clearAllConversations: () => void;
+  upsertConversation: (conv: Conversation) => void;
+  removeConversation: (id: string) => void;
 
-  // Messages
+  // Optimistic local message management
   addMessage: (conversationId: string, message: Omit<ChatMessage, "id" | "createdAt">) => string;
   updateMessage: (conversationId: string, messageId: string, updates: Partial<ChatMessage>) => void;
   appendMessageContent: (conversationId: string, messageId: string, delta: string) => void;
@@ -42,7 +43,6 @@ interface ChatState {
 
   // Helpers
   getActiveConversation: () => Conversation | null;
-  getConversationsByRepo: (repoFullName: string) => Conversation[];
 }
 
 export const useChatStore = create<ChatState>()(
@@ -58,39 +58,24 @@ export const useChatStore = create<ChatState>()(
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
-      createConversation: (repo, firstMessage) => {
-        const id = generateId();
-        const now = new Date().toISOString();
-        const conversation: Conversation = {
-          id,
-          title: firstMessage ? generateTitle(firstMessage) : `Chat with ${repo.name}`,
-          repoFullName: repo.full_name,
-          repoOwner: repo.owner.login,
-          repoName: repo.name,
-          repoBranch: repo.default_branch,
-          repoLanguage: repo.language,
-          repoPrivate: repo.private,
-          messages: [],
-          createdAt: now,
-          updatedAt: now,
-        };
-        set((s) => ({
-          conversations: [conversation, ...s.conversations],
-          activeConversationId: id,
-        }));
-        return id;
-      },
+      setConversations: (conversations) => set({ conversations }),
 
       setActiveConversation: (id) => set({ activeConversationId: id }),
 
-      renameConversation: (id, title) =>
-        set((s) => ({
-          conversations: s.conversations.map((c) =>
-            c.id === id ? { ...c, title, updatedAt: new Date().toISOString() } : c
-          ),
-        })),
+      upsertConversation: (conv) =>
+        set((s) => {
+          const exists = s.conversations.some((c) => c.id === conv.id);
+          if (exists) {
+            return {
+              conversations: s.conversations.map((c) =>
+                c.id === conv.id ? { ...c, ...conv } : c
+              ),
+            };
+          }
+          return { conversations: [conv, ...s.conversations] };
+        }),
 
-      deleteConversation: (id) =>
+      removeConversation: (id) =>
         set((s) => {
           const filtered = s.conversations.filter((c) => c.id !== id);
           const newActive =
@@ -100,11 +85,8 @@ export const useChatStore = create<ChatState>()(
           return { conversations: filtered, activeConversationId: newActive };
         }),
 
-      clearAllConversations: () =>
-        set({ conversations: [], activeConversationId: null }),
-
       addMessage: (conversationId, message) => {
-        const id = generateId();
+        const id = generateLocalId();
         const now = new Date().toISOString();
         const newMessage: ChatMessage = { ...message, id, createdAt: now };
         set((s) => ({
@@ -173,17 +155,14 @@ export const useChatStore = create<ChatState>()(
         const { conversations, activeConversationId } = get();
         return conversations.find((c) => c.id === activeConversationId) ?? null;
       },
-
-      getConversationsByRepo: (repoFullName) =>
-        get().conversations.filter((c) => c.repoFullName === repoFullName),
     }),
     {
-      name: "gh-chatbot-chat",
+      name: "gh-chatbot-ui",
+      // Only persist UI state — conversations come from the DB
       partialize: (s) => ({
-        conversations: s.conversations,
-        activeConversationId: s.activeConversationId,
         selectedRepo: s.selectedRepo,
         sidebarOpen: s.sidebarOpen,
+        activeConversationId: s.activeConversationId,
       }),
     }
   )

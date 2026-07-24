@@ -2,7 +2,6 @@
 
 import * as React from "react";
 import { useChatStore } from "@/store/chat";
-import { useAuthStore } from "@/store/auth";
 import type { ChatMessage } from "@/types/chat";
 import type { GitHubRepo } from "@/types/github";
 
@@ -12,7 +11,6 @@ interface UseChatOptions {
 }
 
 export function useChat({ conversationId, repo }: UseChatOptions) {
-  const { token } = useAuthStore();
   const {
     conversations,
     addMessage,
@@ -37,7 +35,6 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
     abortControllerRef.current = null;
     setIsStreaming(false);
 
-    // Mark last streaming message as done
     if (conversationId) {
       const conv = useChatStore.getState().conversations.find(
         (c) => c.id === conversationId
@@ -51,25 +48,19 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
 
   const sendMessage = React.useCallback(
     async (content: string, retryAssistantId?: string) => {
-      if (!token || !repo || !conversationId) return;
+      if (!repo || !conversationId) return;
       if (isStreaming) return;
 
       setError(null);
 
-      // If retrying, remove the failed assistant message
       if (retryAssistantId) {
         deleteMessage(conversationId, retryAssistantId);
       }
 
-      // Add user message (skip when retrying — already exists)
       if (!retryAssistantId) {
-        addMessage(conversationId, {
-          role: "user",
-          content,
-        });
+        addMessage(conversationId, { role: "user", content });
       }
 
-      // Add placeholder assistant message
       const assistantId = addMessage(conversationId, {
         role: "assistant",
         content: "",
@@ -78,13 +69,12 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
 
       setIsStreaming(true);
 
-      // Snapshot current messages for the API call
       const currentConv = useChatStore
         .getState()
         .conversations.find((c) => c.id === conversationId);
 
       const messagesToSend: ChatMessage[] = (currentConv?.messages ?? []).filter(
-        (m) => m.id !== assistantId
+        (m) => m.id !== assistantId && !m.isStreaming
       );
 
       const controller = new AbortController();
@@ -102,8 +92,8 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
             repoBranch: repo.default_branch,
             repoLanguage: repo.language,
             repoPrivate: repo.private,
-            githubToken: token,
             conversationId,
+            // githubToken is NO LONGER sent from client — server fetches from DB
           }),
         });
 
@@ -150,7 +140,6 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         updateMessage(conversationId, assistantId, { isStreaming: false });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
-          // User stopped — leave content as-is
           updateMessage(conversationId, assistantId, { isStreaming: false });
           return;
         }
@@ -166,23 +155,12 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         abortControllerRef.current = null;
       }
     },
-    [
-      token,
-      repo,
-      conversationId,
-      isStreaming,
-      addMessage,
-      updateMessage,
-      appendMessageContent,
-      deleteMessage,
-    ]
+    [repo, conversationId, isStreaming, addMessage, updateMessage, appendMessageContent, deleteMessage]
   );
 
   const retryLast = React.useCallback(() => {
     if (!conversationId) return;
-    const lastAssistant = [...messages].reverse().find(
-      (m) => m.role === "assistant"
-    );
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
     if (!lastAssistant || !lastUser) return;
     void sendMessage(lastUser.content, lastAssistant.id);

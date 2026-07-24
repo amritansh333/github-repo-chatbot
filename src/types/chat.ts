@@ -20,6 +20,7 @@ export interface Conversation {
   repoBranch: string;
   repoLanguage: string | null;
   repoPrivate: boolean;
+  pinned: boolean;
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;

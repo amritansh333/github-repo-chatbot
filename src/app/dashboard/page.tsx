@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowRight, BookOpen, RefreshCw } from "lucide-react";
-import { useAuthStore } from "@/store/auth";
+import { useSession } from "next-auth/react";
 import { useRepos } from "@/hooks/use-repos";
 import { StatsCards } from "@/components/github/stats-cards";
 import { RepoCard } from "@/components/github/repo-card";
@@ -15,7 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 
 export default function DashboardPage() {
-  const { user } = useAuthStore();
+  const { data: session } = useSession();
+  const user = session?.user;
   const { stats, recent, loading, error, refetch, allRepos } = useRepos();
 
   const greeting = React.useMemo(() => {
@@ -27,13 +28,12 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8 max-w-7xl">
-      {/* Page header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
         <div>
           {user ? (
             <>
               <h2 className="text-2xl font-bold text-[var(--foreground)] tracking-tight">
-                {greeting}, {user.name ?? user.login}
+                {greeting}, {user.name ?? user.email}
               </h2>
               <p className="text-sm text-[var(--muted-foreground)] mt-1">
                 Here&apos;s an overview of your GitHub repositories.
@@ -53,49 +53,29 @@ export default function DashboardPage() {
         )}
       </div>
 
-      {/* Stats */}
       <section aria-label="Repository statistics">
         <StatsCards stats={stats} loading={loading && allRepos.length === 0} />
       </section>
 
-      {/* Error */}
-      {error && !loading && (
-        <ErrorState
-          message={error}
-          onRetry={refetch}
-        />
-      )}
+      {error && !loading && <ErrorState message={error} onRetry={refetch} />}
 
-      {/* Recent repositories */}
       {!error && (
         <section aria-label="Recent repositories">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="text-base font-semibold text-[var(--foreground)]">
-                Recently updated
-              </h3>
-              <p className="text-xs text-[var(--muted-foreground)] mt-0.5">
-                Your 6 most recently active repositories
-              </p>
+              <h3 className="text-base font-semibold text-[var(--foreground)]">Recently updated</h3>
+              <p className="text-xs text-[var(--muted-foreground)] mt-0.5">Your 6 most recently active repositories</p>
             </div>
             <div className="flex items-center gap-2">
               {!loading && allRepos.length > 0 && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={refetch}
-                  aria-label="Refresh"
-                  title="Refresh"
-                >
+                <Button variant="ghost" size="icon" className="h-8 w-8" onClick={refetch} aria-label="Refresh">
                   <RefreshCw className="h-3.5 w-3.5" />
                 </Button>
               )}
               {allRepos.length > 0 && (
                 <Button asChild variant="outline" size="sm" className="gap-1.5 h-8 text-xs">
                   <Link href="/dashboard/repositories">
-                    View all
-                    <ArrowRight className="h-3.5 w-3.5" />
+                    View all <ArrowRight className="h-3.5 w-3.5" />
                   </Link>
                 </Button>
               )}
@@ -104,33 +84,23 @@ export default function DashboardPage() {
 
           {loading && allRepos.length === 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <RepoCardSkeleton key={i} />
-              ))}
+              {Array.from({ length: 6 }).map((_, i) => <RepoCardSkeleton key={i} />)}
             </div>
           ) : recent.length === 0 ? (
             <EmptyState variant="no-repos" />
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {recent.map((repo) => (
-                <RepoCard key={repo.id} repo={repo} />
-              ))}
+              {recent.map((repo) => <RepoCard key={repo.id} repo={repo} />)}
             </div>
           )}
         </section>
       )}
 
-      {/* Activity summary */}
       {!loading && !error && allRepos.length > 0 && (
-        <section
-          aria-label="Repository activity"
-          className="rounded-xl border border-[var(--border)] bg-[var(--card)] overflow-hidden"
-        >
+        <section className="rounded-xl border border-[var(--border)] bg-[var(--card)] overflow-hidden">
           <div className="px-5 py-4 border-b border-[var(--border)] flex items-center gap-2">
             <BookOpen className="h-4 w-4 text-[var(--muted-foreground)]" />
-            <h3 className="text-sm font-semibold text-[var(--foreground)]">
-              All repositories
-            </h3>
+            <h3 className="text-sm font-semibold text-[var(--foreground)]">All repositories</h3>
           </div>
           <ul className="divide-y divide-[var(--border)]">
             {allRepos.slice(0, 8).map((repo) => (
@@ -144,9 +114,7 @@ export default function DashboardPage() {
                       {repo.full_name}
                     </span>
                     {repo.language && (
-                      <span className="hidden sm:block text-xs text-[var(--muted-foreground)] shrink-0">
-                        {repo.language}
-                      </span>
+                      <span className="hidden sm:block text-xs text-[var(--muted-foreground)] shrink-0">{repo.language}</span>
                     )}
                   </div>
                   <span className="text-xs text-[var(--muted-foreground)] shrink-0 ml-4">
@@ -158,12 +126,8 @@ export default function DashboardPage() {
           </ul>
           {allRepos.length > 8 && (
             <div className="px-5 py-3 border-t border-[var(--border)]">
-              <Link
-                href="/dashboard/repositories"
-                className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors flex items-center gap-1"
-              >
-                View all {allRepos.length} repositories
-                <ArrowRight className="h-3 w-3" />
+              <Link href="/dashboard/repositories" className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] flex items-center gap-1">
+                View all {allRepos.length} repositories <ArrowRight className="h-3 w-3" />
               </Link>
             </div>
           )}
