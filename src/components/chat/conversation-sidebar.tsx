@@ -4,14 +4,17 @@ import * as React from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
   Plus, MessageSquare, MoreHorizontal, Pencil, Trash2,
-  GitFork, PanelLeftClose, PanelLeft, Pin, Loader2, RefreshCw, AlertCircle,
+  GitFork, PanelLeftClose, PanelLeft, Pin, Loader2,
+  RefreshCw, AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { toast } from "sonner";
 import { useChatStore } from "@/store/chat";
 import type { Conversation } from "@/types/chat";
 import type { GitHubRepo } from "@/types/github";
@@ -74,40 +77,59 @@ function ConversationItem({
   const handleRename = async (title: string) => {
     setRenaming(false);
     if (title === conversation.title) return;
-    setBusy(true);
+    const prev = conversation.title;
     onRename(title); // optimistic
+    setBusy(true);
     try {
-      await fetch(`/api/conversations/${conversation.id}`, {
+      const res = await fetch(`/api/conversations/${conversation.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title }),
       });
-    } catch { /* keep optimistic */ } finally { setBusy(false); }
+      if (!res.ok) throw new Error();
+      toast.success("Conversation renamed");
+    } catch {
+      onRename(prev); // revert
+      toast.error("Failed to rename");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleDelete = async () => {
-    setBusy(true);
-    onDelete(); // optimistic remove
+    onDelete(); // optimistic
     try {
-      await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
-    } catch { /* keep optimistic */ } finally { setBusy(false); }
+      const res = await fetch(`/api/conversations/${conversation.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error();
+      toast.success("Conversation deleted");
+    } catch {
+      toast.error("Failed to delete conversation");
+    }
   };
 
   const handleTogglePin = async () => {
+    const next = !conversation.pinned;
     onTogglePin(); // optimistic
     try {
-      await fetch(`/api/conversations/${conversation.id}`, {
+      const res = await fetch(`/api/conversations/${conversation.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned: !conversation.pinned }),
+        body: JSON.stringify({ pinned: next }),
       });
-    } catch { /* keep optimistic */ }
+      if (!res.ok) throw new Error();
+      toast.success(next ? "Conversation pinned" : "Conversation unpinned");
+    } catch {
+      onTogglePin(); // revert
+      toast.error("Failed to update conversation");
+    }
   };
 
   return (
     <div
       className={cn(
-        "group relative flex items-start gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-all",
+        "group relative flex items-start gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-all duration-150",
         isActive
           ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
           : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60",
@@ -116,10 +138,16 @@ function ConversationItem({
       onClick={() => !renaming && onSelect()}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => e.key === "Enter" && !renaming && onSelect()}
+      onKeyDown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && !renaming) {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
       aria-current={isActive ? "true" : undefined}
+      aria-label={`Conversation: ${conversation.title}`}
     >
-      <MessageSquare className="h-3.5 w-3.5 mt-0.5 shrink-0 opacity-60" />
+      <MessageSquare className="h-3.5 w-3.5 mt-0.5 shrink-0 opacity-60" aria-hidden="true" />
 
       <div className="flex-1 min-w-0">
         {renaming ? (
@@ -131,15 +159,21 @@ function ConversationItem({
         ) : (
           <>
             <p className="text-xs font-medium truncate leading-snug flex items-center gap-1">
-              {conversation.pinned && <Pin className="h-2.5 w-2.5 shrink-0 opacity-60" />}
+              {conversation.pinned && (
+                <Pin className="h-2.5 w-2.5 shrink-0 opacity-60" aria-hidden="true" />
+              )}
               {conversation.title}
             </p>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <GitFork className="h-2.5 w-2.5 opacity-50 shrink-0" />
+              <GitFork className="h-2.5 w-2.5 opacity-50 shrink-0" aria-hidden="true" />
               <span className="text-[10px] opacity-50 truncate">{conversation.repoName}</span>
-              <span className="text-[10px] opacity-40 shrink-0 ml-auto">
+              <time
+                dateTime={conversation.updatedAt}
+                className="text-[10px] opacity-40 shrink-0 ml-auto"
+                title={new Date(conversation.updatedAt).toLocaleString()}
+              >
                 {formatDistanceToNow(new Date(conversation.updatedAt), { addSuffix: true })}
-              </span>
+              </time>
             </div>
           </>
         )}
@@ -151,9 +185,9 @@ function ConversationItem({
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity -mr-1"
+              className="h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity -mr-1"
               onClick={(e) => e.stopPropagation()}
-              aria-label="Conversation options"
+              aria-label={`Options for ${conversation.title}`}
             >
               <MoreHorizontal className="h-3.5 w-3.5" />
             </Button>
@@ -169,7 +203,8 @@ function ConversationItem({
               onClick={(e) => { e.stopPropagation(); void handleTogglePin(); }}
               className="text-xs"
             >
-              <Pin className="h-3.5 w-3.5" />{conversation.pinned ? "Unpin" : "Pin"}
+              <Pin className="h-3.5 w-3.5" />
+              {conversation.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
@@ -185,21 +220,28 @@ function ConversationItem({
   );
 }
 
+function SidebarSkeleton() {
+  return (
+    <div className="px-2 py-2 space-y-1.5" aria-busy="true" aria-label="Loading conversations">
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} className="flex items-start gap-2 px-3 py-2.5">
+          <Skeleton className="h-3.5 w-3.5 mt-0.5 rounded shrink-0" />
+          <div className="flex-1 space-y-1.5">
+            <Skeleton className="h-3 w-full rounded" />
+            <Skeleton className="h-2.5 w-2/3 rounded" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function ConversationSidebar({
-  repos: _repos,
-  onNewChat,
-  loading,
-  error,
-  onRetry,
+  repos: _repos, onNewChat, loading, error, onRetry,
 }: ConversationSidebarProps) {
   const {
-    conversations,
-    activeConversationId,
-    sidebarOpen,
-    toggleSidebar,
-    setActiveConversation,
-    upsertConversation,
-    removeConversation,
+    conversations, activeConversationId, sidebarOpen, toggleSidebar,
+    setActiveConversation, upsertConversation, removeConversation,
   } = useChatStore();
 
   const grouped = React.useMemo(() => {
@@ -223,7 +265,7 @@ export function ConversationSidebar({
   const renderGroup = (label: string, items: Conversation[]) => {
     if (items.length === 0) return null;
     return (
-      <div key={label}>
+      <section key={label} aria-label={`${label} conversations`}>
         <p className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-widest text-[var(--sidebar-foreground)]/40">
           {label}
         </p>
@@ -240,35 +282,66 @@ export function ConversationSidebar({
             />
           ))}
         </div>
-      </div>
+      </section>
     );
   };
 
+  // Collapsed sidebar
   if (!sidebarOpen) {
     return (
-      <div className="flex flex-col items-center py-4 px-2 border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] h-full gap-2">
-        <Button variant="ghost" size="icon" onClick={toggleSidebar} className="h-8 w-8 text-[var(--sidebar-foreground)]" aria-label="Open sidebar">
+      <nav
+        className="flex flex-col items-center py-4 px-2 border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] h-full gap-2"
+        aria-label="Conversations (collapsed)"
+      >
+        <Button
+          variant="ghost" size="icon"
+          onClick={toggleSidebar}
+          className="h-8 w-8 text-[var(--sidebar-foreground)]"
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+        >
           <PanelLeft className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon" onClick={onNewChat} className="h-8 w-8 text-[var(--sidebar-foreground)]" aria-label="New chat">
+        <Button
+          variant="ghost" size="icon"
+          onClick={onNewChat}
+          className="h-8 w-8 text-[var(--sidebar-foreground)]"
+          aria-label="New chat"
+          title="New chat"
+        >
           <Plus className="h-4 w-4" />
         </Button>
-      </div>
+      </nav>
     );
   }
 
   return (
-    <div className="flex flex-col h-full border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] w-64 shrink-0">
+    <nav
+      className="flex flex-col h-full border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] w-64 shrink-0"
+      aria-label="Conversations"
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--sidebar-border)]">
         <span className="text-xs font-semibold text-[var(--sidebar-foreground)] opacity-70 uppercase tracking-wider">
           Conversations
         </span>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" onClick={onNewChat} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="New chat" title="New chat">
+          <Button
+            variant="ghost" size="icon"
+            onClick={onNewChat}
+            className="h-7 w-7 text-[var(--sidebar-foreground)]"
+            aria-label="New conversation"
+            title="New chat"
+          >
             <Plus className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="icon" onClick={toggleSidebar} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="Close sidebar" title="Close sidebar">
+          <Button
+            variant="ghost" size="icon"
+            onClick={toggleSidebar}
+            className="h-7 w-7 text-[var(--sidebar-foreground)]"
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          >
             <PanelLeftClose className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -277,24 +350,35 @@ export function ConversationSidebar({
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-2 py-1">
         {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-5 w-5 animate-spin text-[var(--sidebar-foreground)]/30" />
-          </div>
+          <SidebarSkeleton />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-12 gap-3 px-4 text-center">
-            <AlertCircle className="h-6 w-6 text-[var(--sidebar-foreground)]/30" />
+          <div
+            className="flex flex-col items-center justify-center py-12 gap-3 px-4 text-center"
+            role="alert"
+            aria-live="assertive"
+          >
+            <AlertCircle className="h-6 w-6 text-[var(--sidebar-foreground)]/30" aria-hidden="true" />
             <p className="text-xs text-[var(--sidebar-foreground)]/40">{error}</p>
             {onRetry && (
-              <Button variant="ghost" size="sm" onClick={onRetry} className="h-7 text-xs gap-1.5">
+              <Button
+                variant="ghost" size="sm"
+                onClick={onRetry}
+                className="h-7 text-xs gap-1.5"
+                aria-label="Retry loading conversations"
+              >
                 <RefreshCw className="h-3 w-3" />Retry
               </Button>
             )}
           </div>
         ) : conversations.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-2 py-12 text-center px-4">
-            <MessageSquare className="h-8 w-8 text-[var(--sidebar-foreground)]/20" />
+          <div
+            className="flex flex-col items-center justify-center py-12 gap-3 text-center px-4"
+            role="status"
+          >
+            <MessageSquare className="h-8 w-8 text-[var(--sidebar-foreground)]/20" aria-hidden="true" />
             <p className="text-xs text-[var(--sidebar-foreground)]/40 leading-relaxed">
-              No conversations yet. Select a repository and start chatting.
+              No conversations yet.{" "}
+              <br />Select a repository and start chatting.
             </p>
           </div>
         ) : (
@@ -306,6 +390,6 @@ export function ConversationSidebar({
           </>
         )}
       </div>
-    </div>
+    </nav>
   );
 }

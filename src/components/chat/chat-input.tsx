@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUp, Square, Paperclip } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -14,7 +14,7 @@ interface ChatInputProps {
 }
 
 const SUGGESTIONS = [
-  "Explain the overall architecture of this repository",
+  "Explain the overall architecture",
   "Summarize the README",
   "Explain the folder structure",
   "Find authentication logic",
@@ -32,7 +32,7 @@ export function ChatInput({
   const [value, setValue] = React.useState("");
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize textarea
+  // Auto-resize
   React.useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -45,10 +45,7 @@ export function ChatInput({
     if (!trimmed || isStreaming || disabled) return;
     onSend(trimmed);
     setValue("");
-    // Reset height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [value, isStreaming, disabled, onSend]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -56,26 +53,33 @@ export function ChatInput({
       e.preventDefault();
       handleSend();
     }
-  };
-
-  const handleSuggestion = (suggestion: string) => {
-    setValue(suggestion);
-    textareaRef.current?.focus();
+    // Escape clears input
+    if (e.key === "Escape") {
+      setValue("");
+    }
   };
 
   const isEmpty = !value.trim();
 
   return (
-    <div className="space-y-3">
-      {/* Suggestions — show only when input is empty */}
-      {isEmpty && !isStreaming && (
-        <div className="flex flex-wrap gap-2 justify-center px-4">
+    <div className="space-y-2.5">
+      {/* Suggestions */}
+      {isEmpty && !isStreaming && !disabled && (
+        <div
+          className="flex flex-wrap gap-2 justify-center px-2"
+          role="list"
+          aria-label="Suggested questions"
+        >
           {SUGGESTIONS.map((s) => (
             <button
               key={s}
-              onClick={() => handleSuggestion(s)}
-              disabled={disabled}
-              className="text-xs px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:border-[var(--ring)]/30 hover:bg-[var(--accent)] transition-all disabled:opacity-40 disabled:pointer-events-none"
+              role="listitem"
+              onClick={() => {
+                setValue(s);
+                setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              className="text-xs px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:border-violet-300 dark:hover:border-violet-700 hover:bg-[var(--accent)] transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+              aria-label={`Ask: ${s}`}
             >
               {s}
             </button>
@@ -83,15 +87,22 @@ export function ChatInput({
         </div>
       )}
 
-      {/* Input box */}
+      {/* Input */}
       <div
         className={cn(
-          "relative flex items-end gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-sm transition-all duration-200",
-          "focus-within:border-[var(--ring)]/40 focus-within:shadow-md",
-          disabled && "opacity-50"
+          "relative flex items-end gap-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-3 shadow-sm",
+          "transition-all duration-200",
+          "focus-within:border-violet-300 dark:focus-within:border-violet-700 focus-within:shadow-md focus-within:shadow-violet-500/5",
+          (disabled && !isStreaming) && "opacity-50 pointer-events-none"
         )}
+        role="form"
+        aria-label="Chat input"
       >
+        <label htmlFor="chat-textarea" className="sr-only">
+          Message
+        </label>
         <textarea
+          id="chat-textarea"
           ref={textareaRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -101,19 +112,19 @@ export function ChatInput({
           rows={1}
           aria-label="Chat message"
           aria-multiline="true"
+          aria-describedby="chat-hint"
           className="flex-1 resize-none bg-transparent text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none leading-relaxed max-h-48 overflow-y-auto disabled:cursor-not-allowed"
         />
 
-        {/* Actions */}
         <div className="flex items-center gap-1 shrink-0">
           {isStreaming ? (
             <Button
               size="icon"
               variant="outline"
               onClick={onStop}
-              className="h-8 w-8 rounded-xl border-[var(--border)]"
+              className="h-8 w-8 rounded-xl border-[var(--border)] hover:border-red-300 hover:text-red-500 transition-colors"
               aria-label="Stop generating"
-              title="Stop generating"
+              title="Stop generating (Esc)"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
             </Button>
@@ -123,10 +134,10 @@ export function ChatInput({
               onClick={handleSend}
               disabled={isEmpty || disabled}
               className={cn(
-                "h-8 w-8 rounded-xl transition-all duration-200",
-                isEmpty
-                  ? "bg-[var(--muted)] text-[var(--muted-foreground)] cursor-not-allowed"
-                  : "bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90"
+                "h-8 w-8 rounded-xl transition-all duration-200 shadow-sm",
+                isEmpty || disabled
+                  ? "bg-[var(--muted)] text-[var(--muted-foreground)] cursor-not-allowed shadow-none"
+                  : "bg-gradient-to-br from-violet-500 to-blue-600 text-white hover:opacity-90 hover:shadow-md hover:shadow-violet-500/20"
               )}
               aria-label="Send message"
               title="Send (Enter)"
@@ -137,8 +148,13 @@ export function ChatInput({
         </div>
       </div>
 
-      <p className="text-center text-[10px] text-[var(--muted-foreground)]">
-        <kbd className="font-mono">Enter</kbd> to send · <kbd className="font-mono">Shift+Enter</kbd> for new line
+      <p id="chat-hint" className="text-center text-[10px] text-[var(--muted-foreground)]">
+        <kbd className="font-mono bg-[var(--muted)] px-1 py-0.5 rounded text-[9px]">Enter</kbd>
+        {" "}to send ·{" "}
+        <kbd className="font-mono bg-[var(--muted)] px-1 py-0.5 rounded text-[9px]">Shift+Enter</kbd>
+        {" "}for new line ·{" "}
+        <kbd className="font-mono bg-[var(--muted)] px-1 py-0.5 rounded text-[9px]">Esc</kbd>
+        {" "}to clear
       </p>
     </div>
   );
