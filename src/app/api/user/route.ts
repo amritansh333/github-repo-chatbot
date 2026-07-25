@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "../../../../auth";
 import { db } from "@/db";
-import { users, conversations, messages, repositoryPreferences, userSettings } from "@/db/schema";
+import { users, conversations, repositoryPreferences, userSettings } from "@/db/schema";
 import { eq, count } from "drizzle-orm";
 
 export async function GET(): Promise<Response> {
@@ -10,41 +10,35 @@ export async function GET(): Promise<Response> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, session.user.id),
-    columns: {
-      id: true,
-      name: true,
-      email: true,
-      image: true,
-      createdAt: true,
-      githubAccessToken: false, // never return raw token
-    },
-    with: {
-      userSettings: true,
-    },
-  });
+  const userId = session.user.id;
+
+  const [user, convCount, repoCount, settings] = await Promise.all([
+    db.query.users.findFirst({
+      where: eq(users.id, userId),
+      columns: {
+        id: true,
+        name: true,
+        email: true,
+        image: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    }),
+    db.select({ value: count() }).from(conversations).where(eq(conversations.userId, userId)),
+    db.select({ value: count() }).from(repositoryPreferences).where(eq(repositoryPreferences.userId, userId)),
+    db.query.userSettings.findFirst({ where: eq(userSettings.userId, userId) }),
+  ]);
 
   if (!user) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  // Counts for the profile
-  const [convCount] = await db
-    .select({ value: count() })
-    .from(conversations)
-    .where(eq(conversations.userId, session.user.id));
-
-  const [repoCount] = await db
-    .select({ value: count() })
-    .from(repositoryPreferences)
-    .where(eq(repositoryPreferences.userId, session.user.id));
-
   return NextResponse.json({
     ...user,
+    userSettings: settings ?? null,
     stats: {
-      conversations: convCount?.value ?? 0,
-      repositories: repoCount?.value ?? 0,
+      conversations: convCount[0]?.value ?? 0,
+      repositories: repoCount[0]?.value ?? 0,
     },
   });
 }
@@ -88,8 +82,6 @@ export async function DELETE(): Promise<Response> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Cascade deletes handle related records via FK constraints
   await db.delete(users).where(eq(users.id, session.user.id));
-
   return NextResponse.json({ success: true });
 }

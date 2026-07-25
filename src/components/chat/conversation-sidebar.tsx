@@ -3,25 +3,14 @@
 import * as React from "react";
 import { formatDistanceToNow } from "date-fns";
 import {
-  Plus,
-  MessageSquare,
-  MoreHorizontal,
-  Pencil,
-  Trash2,
-  GitFork,
-  PanelLeftClose,
-  PanelLeft,
-  Pin,
-  Loader2,
+  Plus, MessageSquare, MoreHorizontal, Pencil, Trash2,
+  GitFork, PanelLeftClose, PanelLeft, Pin, Loader2, RefreshCw, AlertCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useChatStore } from "@/store/chat";
 import type { Conversation } from "@/types/chat";
@@ -31,6 +20,8 @@ interface ConversationSidebarProps {
   repos: GitHubRepo[];
   onNewChat: () => void;
   loading?: boolean;
+  error?: string | null;
+  onRetry?: () => void;
 }
 
 interface RenameInputProps {
@@ -41,16 +32,16 @@ interface RenameInputProps {
 
 function RenameInput({ initialValue, onSave, onCancel }: RenameInputProps) {
   const [value, setValue] = React.useState(initialValue);
-  const inputRef = React.useRef<HTMLInputElement>(null);
+  const ref = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
+    ref.current?.focus();
+    ref.current?.select();
   }, []);
 
   return (
     <input
-      ref={inputRef}
+      ref={ref}
       value={value}
       onChange={(e) => setValue(e.target.value)}
       onBlur={() => onSave(value.trim() || initialValue)}
@@ -75,14 +66,43 @@ interface ConversationItemProps {
 }
 
 function ConversationItem({
-  conversation,
-  isActive,
-  onSelect,
-  onRename,
-  onDelete,
-  onTogglePin,
+  conversation, isActive, onSelect, onRename, onDelete, onTogglePin,
 }: ConversationItemProps) {
   const [renaming, setRenaming] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+
+  const handleRename = async (title: string) => {
+    setRenaming(false);
+    if (title === conversation.title) return;
+    setBusy(true);
+    onRename(title); // optimistic
+    try {
+      await fetch(`/api/conversations/${conversation.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+    } catch { /* keep optimistic */ } finally { setBusy(false); }
+  };
+
+  const handleDelete = async () => {
+    setBusy(true);
+    onDelete(); // optimistic remove
+    try {
+      await fetch(`/api/conversations/${conversation.id}`, { method: "DELETE" });
+    } catch { /* keep optimistic */ } finally { setBusy(false); }
+  };
+
+  const handleTogglePin = async () => {
+    onTogglePin(); // optimistic
+    try {
+      await fetch(`/api/conversations/${conversation.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: !conversation.pinned }),
+      });
+    } catch { /* keep optimistic */ }
+  };
 
   return (
     <div
@@ -90,7 +110,8 @@ function ConversationItem({
         "group relative flex items-start gap-2 rounded-lg px-3 py-2.5 cursor-pointer transition-all",
         isActive
           ? "bg-[var(--sidebar-accent)] text-[var(--sidebar-accent-foreground)]"
-          : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60"
+          : "text-[var(--sidebar-foreground)] hover:bg-[var(--sidebar-accent)]/60",
+        busy && "opacity-60 pointer-events-none"
       )}
       onClick={() => !renaming && onSelect()}
       role="button"
@@ -104,7 +125,7 @@ function ConversationItem({
         {renaming ? (
           <RenameInput
             initialValue={conversation.title}
-            onSave={(v) => { onRename(v); setRenaming(false); }}
+            onSave={handleRename}
             onCancel={() => setRenaming(false)}
           />
         ) : (
@@ -115,9 +136,7 @@ function ConversationItem({
             </p>
             <div className="flex items-center gap-1.5 mt-0.5">
               <GitFork className="h-2.5 w-2.5 opacity-50 shrink-0" />
-              <span className="text-[10px] opacity-50 truncate">
-                {conversation.repoName}
-              </span>
+              <span className="text-[10px] opacity-50 truncate">{conversation.repoName}</span>
               <span className="text-[10px] opacity-40 shrink-0 ml-auto">
                 {formatDistanceToNow(new Date(conversation.updatedAt), { addSuffix: true })}
               </span>
@@ -140,21 +159,24 @@ function ConversationItem({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-40">
-            <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setRenaming(true); }} className="text-xs">
-              <Pencil className="h-3.5 w-3.5" />
-              Rename
+            <DropdownMenuItem
+              onClick={(e) => { e.stopPropagation(); setRenaming(true); }}
+              className="text-xs"
+            >
+              <Pencil className="h-3.5 w-3.5" />Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={(e) => { e.stopPropagation(); onTogglePin(); }} className="text-xs">
-              <Pin className="h-3.5 w-3.5" />
-              {conversation.pinned ? "Unpin" : "Pin"}
+            <DropdownMenuItem
+              onClick={(e) => { e.stopPropagation(); void handleTogglePin(); }}
+              className="text-xs"
+            >
+              <Pin className="h-3.5 w-3.5" />{conversation.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              onClick={(e) => { e.stopPropagation(); void handleDelete(); }}
               className="text-xs text-red-600 dark:text-red-400 focus:text-red-600 dark:focus:text-red-400"
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
+              <Trash2 className="h-3.5 w-3.5" />Delete
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -163,7 +185,13 @@ function ConversationItem({
   );
 }
 
-export function ConversationSidebar({ repos: _repos, onNewChat, loading }: ConversationSidebarProps) {
+export function ConversationSidebar({
+  repos: _repos,
+  onNewChat,
+  loading,
+  error,
+  onRetry,
+}: ConversationSidebarProps) {
   const {
     conversations,
     activeConversationId,
@@ -174,42 +202,6 @@ export function ConversationSidebar({ repos: _repos, onNewChat, loading }: Conve
     removeConversation,
   } = useChatStore();
 
-  const handleRename = async (id: string, title: string) => {
-    try {
-      const res = await fetch(`/api/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
-      });
-      if (!res.ok) return;
-      const updated = await res.json() as Conversation;
-      const conv = conversations.find((c) => c.id === id);
-      if (conv) upsertConversation({ ...conv, title: updated.title });
-    } catch { /* non-fatal */ }
-  };
-
-  const handleDelete = async (id: string) => {
-    try {
-      await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-      removeConversation(id);
-    } catch { /* non-fatal */ }
-  };
-
-  const handleTogglePin = async (id: string) => {
-    const conv = conversations.find((c) => c.id === id);
-    if (!conv) return;
-    try {
-      const res = await fetch(`/api/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned: !conv.pinned }),
-      });
-      if (!res.ok) return;
-      const updated = await res.json() as Conversation;
-      upsertConversation({ ...conv, pinned: updated.pinned });
-    } catch { /* non-fatal */ }
-  };
-
   const grouped = React.useMemo(() => {
     const now = new Date();
     const pinned: Conversation[] = [];
@@ -219,7 +211,8 @@ export function ConversationSidebar({ repos: _repos, onNewChat, loading }: Conve
 
     for (const c of conversations) {
       if (c.pinned) { pinned.push(c); continue; }
-      const diffDays = (now.getTime() - new Date(c.updatedAt).getTime()) / (1000 * 60 * 60 * 24);
+      const diffDays =
+        (now.getTime() - new Date(c.updatedAt).getTime()) / (1000 * 60 * 60 * 24);
       if (diffDays < 1) today.push(c);
       else if (diffDays < 2) yesterday.push(c);
       else older.push(c);
@@ -241,9 +234,9 @@ export function ConversationSidebar({ repos: _repos, onNewChat, loading }: Conve
               conversation={c}
               isActive={c.id === activeConversationId}
               onSelect={() => setActiveConversation(c.id)}
-              onRename={(title) => void handleRename(c.id, title)}
-              onDelete={() => void handleDelete(c.id)}
-              onTogglePin={() => void handleTogglePin(c.id)}
+              onRename={(title) => upsertConversation({ ...c, title })}
+              onDelete={() => removeConversation(c.id)}
+              onTogglePin={() => upsertConversation({ ...c, pinned: !c.pinned })}
             />
           ))}
         </div>
@@ -266,24 +259,36 @@ export function ConversationSidebar({ repos: _repos, onNewChat, loading }: Conve
 
   return (
     <div className="flex flex-col h-full border-r border-[var(--sidebar-border)] bg-[var(--sidebar-background)] w-64 shrink-0">
+      {/* Header */}
       <div className="flex items-center justify-between px-3 py-3 border-b border-[var(--sidebar-border)]">
         <span className="text-xs font-semibold text-[var(--sidebar-foreground)] opacity-70 uppercase tracking-wider">
           Conversations
         </span>
         <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" onClick={onNewChat} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="New chat">
+          <Button variant="ghost" size="icon" onClick={onNewChat} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="New chat" title="New chat">
             <Plus className="h-3.5 w-3.5" />
           </Button>
-          <Button variant="ghost" size="icon" onClick={toggleSidebar} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="Close sidebar">
+          <Button variant="ghost" size="icon" onClick={toggleSidebar} className="h-7 w-7 text-[var(--sidebar-foreground)]" aria-label="Close sidebar" title="Close sidebar">
             <PanelLeftClose className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
 
+      {/* Content */}
       <div className="flex-1 overflow-y-auto px-2 py-1">
         {loading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-5 w-5 animate-spin text-[var(--sidebar-foreground)]/30" />
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-12 gap-3 px-4 text-center">
+            <AlertCircle className="h-6 w-6 text-[var(--sidebar-foreground)]/30" />
+            <p className="text-xs text-[var(--sidebar-foreground)]/40">{error}</p>
+            {onRetry && (
+              <Button variant="ghost" size="sm" onClick={onRetry} className="h-7 text-xs gap-1.5">
+                <RefreshCw className="h-3 w-3" />Retry
+              </Button>
+            )}
           </div>
         ) : conversations.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-2 py-12 text-center px-4">

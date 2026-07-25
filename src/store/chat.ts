@@ -14,34 +14,32 @@ function generateTitle(firstMessage: string): string {
   return trimmed.length < firstMessage.trim().length ? `${trimmed}…` : trimmed;
 }
 
+function sortByUpdated(convs: Conversation[]): Conversation[] {
+  return [...convs].sort(
+    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  );
+}
+
 interface ChatState {
-  // Conversations loaded from DB — indexed by id
   conversations: Conversation[];
   activeConversationId: string | null;
   selectedRepo: GitHubRepo | null;
-  // UI-only state (persisted locally)
   sidebarOpen: boolean;
 
-  // Repo selection
   setSelectedRepo: (repo: GitHubRepo | null) => void;
-
-  // Sidebar
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
 
-  // Conversations (synced with DB externally via hooks)
   setConversations: (conversations: Conversation[]) => void;
   setActiveConversation: (id: string | null) => void;
   upsertConversation: (conv: Conversation) => void;
   removeConversation: (id: string) => void;
 
-  // Optimistic local message management
   addMessage: (conversationId: string, message: Omit<ChatMessage, "id" | "createdAt">) => string;
   updateMessage: (conversationId: string, messageId: string, updates: Partial<ChatMessage>) => void;
   appendMessageContent: (conversationId: string, messageId: string, delta: string) => void;
   deleteMessage: (conversationId: string, messageId: string) => void;
 
-  // Helpers
   getActiveConversation: () => Conversation | null;
 }
 
@@ -54,25 +52,21 @@ export const useChatStore = create<ChatState>()(
       sidebarOpen: true,
 
       setSelectedRepo: (repo) => set({ selectedRepo: repo }),
-
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 
-      setConversations: (conversations) => set({ conversations }),
+      setConversations: (conversations) =>
+        set({ conversations: sortByUpdated(conversations) }),
 
       setActiveConversation: (id) => set({ activeConversationId: id }),
 
       upsertConversation: (conv) =>
         set((s) => {
           const exists = s.conversations.some((c) => c.id === conv.id);
-          if (exists) {
-            return {
-              conversations: s.conversations.map((c) =>
-                c.id === conv.id ? { ...c, ...conv } : c
-              ),
-            };
-          }
-          return { conversations: [conv, ...s.conversations] };
+          const updated = exists
+            ? s.conversations.map((c) => (c.id === conv.id ? { ...c, ...conv } : c))
+            : [conv, ...s.conversations];
+          return { conversations: sortByUpdated(updated) };
         }),
 
       removeConversation: (id) =>
@@ -89,8 +83,8 @@ export const useChatStore = create<ChatState>()(
         const id = generateLocalId();
         const now = new Date().toISOString();
         const newMessage: ChatMessage = { ...message, id, createdAt: now };
-        set((s) => ({
-          conversations: s.conversations.map((c) =>
+        set((s) => {
+          const updated = s.conversations.map((c) =>
             c.id === conversationId
               ? {
                   ...c,
@@ -102,8 +96,9 @@ export const useChatStore = create<ChatState>()(
                       : c.title,
                 }
               : c
-          ),
-        }));
+          );
+          return { conversations: sortByUpdated(updated) };
+        });
         return id;
       },
 
@@ -129,9 +124,7 @@ export const useChatStore = create<ChatState>()(
               ? {
                   ...c,
                   messages: c.messages.map((m) =>
-                    m.id === messageId
-                      ? { ...m, content: m.content + delta }
-                      : m
+                    m.id === messageId ? { ...m, content: m.content + delta } : m
                   ),
                 }
               : c
@@ -158,7 +151,6 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: "gh-chatbot-ui",
-      // Only persist UI state — conversations come from the DB
       partialize: (s) => ({
         selectedRepo: s.selectedRepo,
         sidebarOpen: s.sidebarOpen,

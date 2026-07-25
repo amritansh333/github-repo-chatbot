@@ -10,6 +10,21 @@ interface UseChatOptions {
   repo: GitHubRepo | null;
 }
 
+async function persistMessages(
+  conversationId: string,
+  messagesToSave: Array<{ role: string; content: string }>
+): Promise<void> {
+  try {
+    await fetch(`/api/conversations/${conversationId}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: messagesToSave }),
+    });
+  } catch {
+    // Non-fatal — messages are already in local state
+  }
+}
+
 export function useChat({ conversationId, repo }: UseChatOptions) {
   const {
     conversations,
@@ -17,6 +32,7 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
     updateMessage,
     appendMessageContent,
     deleteMessage,
+    upsertConversation,
   } = useChatStore();
 
   const [isStreaming, setIsStreaming] = React.useState(false);
@@ -36,9 +52,9 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
     setIsStreaming(false);
 
     if (conversationId) {
-      const conv = useChatStore.getState().conversations.find(
-        (c) => c.id === conversationId
-      );
+      const conv = useChatStore
+        .getState()
+        .conversations.find((c) => c.id === conversationId);
       const lastMsg = conv?.messages.findLast((m) => m.isStreaming);
       if (lastMsg) {
         updateMessage(conversationId, lastMsg.id, { isStreaming: false });
@@ -53,14 +69,24 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
 
       setError(null);
 
+      // Remove old assistant message when retrying
       if (retryAssistantId) {
         deleteMessage(conversationId, retryAssistantId);
       }
+
+      // Add user message optimistically (skip if retrying — reuse existing)
+      const userContent = retryAssistantId
+        ? (useChatStore
+            .getState()
+            .conversations.find((c) => c.id === conversationId)
+            ?.messages.findLast((m) => m.role === "user")?.content ?? content)
+        : content;
 
       if (!retryAssistantId) {
         addMessage(conversationId, { role: "user", content });
       }
 
+      // Add placeholder assistant message
       const assistantId = addMessage(conversationId, {
         role: "assistant",
         content: "",
@@ -80,6 +106,8 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      let finalAssistantContent = "";
+
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
@@ -93,7 +121,6 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
             repoLanguage: repo.language,
             repoPrivate: repo.private,
             conversationId,
-            // githubToken is NO LONGER sent from client — server fetches from DB
           }),
         });
 
@@ -122,8 +149,13 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
             if (!raw) continue;
 
             try {
-              const chunk = JSON.parse(raw) as { type: string; content?: string; error?: string };
+              const chunk = JSON.parse(raw) as {
+                type: string;
+                content?: string;
+                error?: string;
+              };
               if (chunk.type === "delta" && chunk.content) {
+                finalAssistantContent += chunk.content;
                 appendMessageContent(conversationId, assistantId, chunk.content);
               } else if (chunk.type === "done") {
                 updateMessage(conversationId, assistantId, { isStreaming: false });
@@ -138,9 +170,34 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         }
 
         updateMessage(conversationId, assistantId, { isStreaming: false });
+
+        // Persist both messages to DB after successful streaming
+        const toSave: Array<{ role: string; content: string }> = [];
+        if (!retryAssistantId) {
+          toSave.push({ role: "user", content: userContent });
+        }
+        if (finalAssistantContent) {
+          toSave.push({ role: "assistant", content: finalAssistantContent });
+        }
+        if (toSave.length > 0) {
+          void persistMessages(conversationId, toSave);
+        }
+
+        // Re-sort conversations so this one bubbles to top
+        const updatedConv = useChatStore
+          .getState()
+          .conversations.find((c) => c.id === conversationId);
+        if (updatedConv) {
+          upsertConversation({ ...updatedConv, updatedAt: new Date().toISOString() });
+        }
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           updateMessage(conversationId, assistantId, { isStreaming: false });
+          // Persist what we have so far on stop
+          const toSave: Array<{ role: string; content: string }> = [];
+          if (!retryAssistantId) toSave.push({ role: "user", content: userContent });
+          if (finalAssistantContent) toSave.push({ role: "assistant", content: finalAssistantContent });
+          if (toSave.length > 0) void persistMessages(conversationId, toSave);
           return;
         }
         const msg = err instanceof Error ? err.message : "Unknown error";
@@ -155,7 +212,16 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         abortControllerRef.current = null;
       }
     },
-    [repo, conversationId, isStreaming, addMessage, updateMessage, appendMessageContent, deleteMessage]
+    [
+      repo,
+      conversationId,
+      isStreaming,
+      addMessage,
+      updateMessage,
+      appendMessageContent,
+      deleteMessage,
+      upsertConversation,
+    ]
   );
 
   const retryLast = React.useCallback(() => {

@@ -18,7 +18,6 @@ export default function ChatPage() {
     conversations,
     selectedRepo,
     activeConversationId,
-    sidebarOpen,
     setSelectedRepo,
     setActiveConversation,
     setConversations,
@@ -27,51 +26,66 @@ export default function ChatPage() {
 
   const { allRepos, loading: reposLoading, hasToken } = useRepos();
   const [convLoading, setConvLoading] = React.useState(true);
+  const [convError, setConvError] = React.useState<string | null>(null);
 
-  // Load conversations from DB on mount
+  // Load all conversations from DB on mount
   React.useEffect(() => {
+    let cancelled = false;
     void (async () => {
+      setConvLoading(true);
+      setConvError(null);
       try {
         const res = await fetch("/api/conversations");
-        if (!res.ok) return;
-        const data = await res.json() as Array<Conversation & { messages?: [] }>;
-        // Map DB rows to local Conversation shape with empty messages array
-        const convs: Conversation[] = data.map((c) => ({
-          ...c,
-          messages: [],
-        }));
-        setConversations(convs);
+        if (!res.ok) throw new Error("Failed to load conversations");
+        const data = await res.json() as Array<Omit<Conversation, "messages">>;
+        if (!cancelled) {
+          setConversations(data.map((c) => ({ ...c, messages: [] })));
+        }
       } catch {
-        // non-fatal
+        if (!cancelled) setConvError("Could not load conversations");
       } finally {
-        setConvLoading(false);
+        if (!cancelled) setConvLoading(false);
       }
     })();
+    return () => { cancelled = true; };
   }, [setConversations]);
 
-  // When a conversation is selected, load its messages
+  // Load messages when a conversation is selected
   React.useEffect(() => {
     if (!activeConversationId) return;
     const conv = conversations.find((c) => c.id === activeConversationId);
-    if (!conv || conv.messages.length > 0) return; // already loaded
+    // Only fetch if messages haven't been loaded yet
+    if (!conv || conv.messages.length > 0) return;
 
+    let cancelled = false;
     void (async () => {
       try {
         const res = await fetch(`/api/conversations/${activeConversationId}/messages`);
-        if (!res.ok) return;
-        const msgs = await res.json() as Array<{ id: string; role: string; content: string; createdAt: string }>;
-        const mapped = msgs.map((m) => ({
-          id: m.id,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          createdAt: m.createdAt,
-        }));
-        upsertConversation({ ...conv, messages: mapped });
+        if (!res.ok || cancelled) return;
+        const msgs = await res.json() as Array<{
+          id: string;
+          role: string;
+          content: string;
+          createdAt: string;
+        }>;
+        if (!cancelled) {
+          upsertConversation({
+            ...conv,
+            messages: msgs.map((m) => ({
+              id: m.id,
+              role: m.role as "user" | "assistant",
+              content: m.content,
+              createdAt: m.createdAt,
+            })),
+          });
+        }
       } catch {
-        // non-fatal
+        // non-fatal — messages stay empty, user can retry by re-selecting
       }
     })();
-  }, [activeConversationId, conversations, upsertConversation]);
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConversationId]);
 
   const handleSelectRepo = React.useCallback(
     (repo: GitHubRepo) => {
@@ -90,7 +104,7 @@ export default function ChatPage() {
     setActiveConversation(null);
   }, [setActiveConversation]);
 
-  // Called by ChatWindow on first message — creates conversation in DB then locally
+  // Creates conversation in DB first, then adds to local store
   const handleFirstMessage = React.useCallback(
     async (content: string): Promise<string> => {
       if (!selectedRepo) return "";
@@ -109,7 +123,7 @@ export default function ChatPage() {
           }),
         });
         if (!res.ok) throw new Error("Failed to create conversation");
-        const conv = await res.json() as Conversation;
+        const conv = await res.json() as Omit<Conversation, "messages">;
         const localConv: Conversation = { ...conv, messages: [] };
         upsertConversation(localConv);
         setActiveConversation(conv.id);
@@ -121,7 +135,6 @@ export default function ChatPage() {
     [selectedRepo, upsertConversation, setActiveConversation]
   );
 
-  // No token warning
   if (hasToken === false) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 -m-4 sm:-m-6">
@@ -129,17 +142,13 @@ export default function ChatPage() {
           <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 dark:bg-amber-900/20 mx-auto">
             <AlertTriangle className="h-7 w-7 text-amber-600 dark:text-amber-400" />
           </div>
-          <h2 className="text-base font-semibold text-[var(--foreground)]">
-            GitHub token required
-          </h2>
+          <h2 className="text-base font-semibold text-[var(--foreground)]">GitHub token required</h2>
           <p className="text-sm text-[var(--muted-foreground)] leading-relaxed">
-            To browse repositories and chat, you need to add a GitHub Personal
-            Access Token in Settings.
+            To browse repositories and chat, you need to add a GitHub Personal Access Token in Settings.
           </p>
           <Button asChild className="gap-2">
             <Link href="/dashboard/settings">
-              <ExternalLink className="h-4 w-4" />
-              Go to Settings
+              <ExternalLink className="h-4 w-4" />Go to Settings
             </Link>
           </Button>
         </div>
@@ -153,6 +162,18 @@ export default function ChatPage() {
         repos={allRepos}
         onNewChat={handleNewChat}
         loading={convLoading}
+        error={convError}
+        onRetry={() => {
+          setConvLoading(true);
+          setConvError(null);
+          fetch("/api/conversations")
+            .then((r) => r.json())
+            .then((data: Array<Omit<Conversation, "messages">>) => {
+              setConversations(data.map((c) => ({ ...c, messages: [] })));
+            })
+            .catch(() => setConvError("Could not load conversations"))
+            .finally(() => setConvLoading(false));
+        }}
       />
 
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
@@ -171,23 +192,17 @@ export default function ChatPage() {
           {selectedRepo && (
             <div className="hidden sm:flex items-center gap-2 shrink-0">
               <span className="text-xs text-[var(--muted-foreground)] flex items-center gap-1.5">
-                <GitBranch className="h-3.5 w-3.5" />
-                {selectedRepo.default_branch}
+                <GitBranch className="h-3.5 w-3.5" />{selectedRepo.default_branch}
               </span>
               {selectedRepo.language && (
                 <span className="flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: getLanguageColor(selectedRepo.language) }}
-                  />
+                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getLanguageColor(selectedRepo.language) }} />
                   {selectedRepo.language}
                 </span>
               )}
-              {selectedRepo.private ? (
-                <Lock className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
-              ) : (
-                <Globe className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
-              )}
+              {selectedRepo.private
+                ? <Lock className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+                : <Globe className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />}
             </div>
           )}
 
