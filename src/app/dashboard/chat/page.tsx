@@ -4,9 +4,11 @@ import * as React from "react";
 import { GitBranch, Plus, Lock, Globe, AlertTriangle, ExternalLink } from "lucide-react";
 import { useChatStore } from "@/store/chat";
 import { useRepos } from "@/hooks/use-repos";
+import { useRag } from "@/hooks/use-rag";
 import { ConversationSidebar } from "@/components/chat/conversation-sidebar";
 import { ChatWindow } from "@/components/chat/chat-window";
 import { RepoSelector } from "@/components/chat/repo-selector";
+import { RagStatus } from "@/components/chat/rag-status";
 import { Button } from "@/components/ui/button";
 import { getLanguageColor } from "@/lib/language-colors";
 import type { GitHubRepo } from "@/types/github";
@@ -25,10 +27,11 @@ export default function ChatPage() {
   } = useChatStore();
 
   const { allRepos, loading: reposLoading, hasToken } = useRepos();
+  const { state: ragState, progress: ragProgress, reindex } = useRag(selectedRepo);
   const [convLoading, setConvLoading] = React.useState(true);
   const [convError, setConvError] = React.useState<string | null>(null);
 
-  // Load all conversations from DB on mount
+  // Load conversations from DB on mount
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -38,9 +41,7 @@ export default function ChatPage() {
         const res = await fetch("/api/conversations");
         if (!res.ok) throw new Error("Failed to load conversations");
         const data = await res.json() as Array<Omit<Conversation, "messages">>;
-        if (!cancelled) {
-          setConversations(data.map((c) => ({ ...c, messages: [] })));
-        }
+        if (!cancelled) setConversations(data.map((c) => ({ ...c, messages: [] })));
       } catch {
         if (!cancelled) setConvError("Could not load conversations");
       } finally {
@@ -50,11 +51,10 @@ export default function ChatPage() {
     return () => { cancelled = true; };
   }, [setConversations]);
 
-  // Load messages when a conversation is selected
+  // Load messages when conversation is selected
   React.useEffect(() => {
     if (!activeConversationId) return;
     const conv = conversations.find((c) => c.id === activeConversationId);
-    // Only fetch if messages haven't been loaded yet
     if (!conv || conv.messages.length > 0) return;
 
     let cancelled = false;
@@ -63,10 +63,7 @@ export default function ChatPage() {
         const res = await fetch(`/api/conversations/${activeConversationId}/messages`);
         if (!res.ok || cancelled) return;
         const msgs = await res.json() as Array<{
-          id: string;
-          role: string;
-          content: string;
-          createdAt: string;
+          id: string; role: string; content: string; createdAt: string;
         }>;
         if (!cancelled) {
           upsertConversation({
@@ -79,21 +76,16 @@ export default function ChatPage() {
             })),
           });
         }
-      } catch {
-        // non-fatal — messages stay empty, user can retry by re-selecting
-      }
+      } catch { /* non-fatal */ }
     })();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConversationId]);
 
-  const handleSelectRepo = React.useCallback(
-    (repo: GitHubRepo) => {
-      setSelectedRepo(repo);
-      setActiveConversation(null);
-    },
-    [setSelectedRepo, setActiveConversation]
-  );
+  const handleSelectRepo = React.useCallback((repo: GitHubRepo) => {
+    setSelectedRepo(repo);
+    setActiveConversation(null);
+  }, [setSelectedRepo, setActiveConversation]);
 
   const handleClearRepo = React.useCallback(() => {
     setSelectedRepo(null);
@@ -104,36 +96,29 @@ export default function ChatPage() {
     setActiveConversation(null);
   }, [setActiveConversation]);
 
-  // Creates conversation in DB first, then adds to local store
-  const handleFirstMessage = React.useCallback(
-    async (content: string): Promise<string> => {
-      if (!selectedRepo) return "";
-      try {
-        const res = await fetch("/api/conversations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: content.trim().slice(0, 60),
-            repoFullName: selectedRepo.full_name,
-            repoOwner: selectedRepo.owner.login,
-            repoName: selectedRepo.name,
-            repoBranch: selectedRepo.default_branch,
-            repoLanguage: selectedRepo.language,
-            repoPrivate: selectedRepo.private,
-          }),
-        });
-        if (!res.ok) throw new Error("Failed to create conversation");
-        const conv = await res.json() as Omit<Conversation, "messages">;
-        const localConv: Conversation = { ...conv, messages: [] };
-        upsertConversation(localConv);
-        setActiveConversation(conv.id);
-        return conv.id;
-      } catch {
-        return "";
-      }
-    },
-    [selectedRepo, upsertConversation, setActiveConversation]
-  );
+  const handleFirstMessage = React.useCallback(async (content: string): Promise<string> => {
+    if (!selectedRepo) return "";
+    try {
+      const res = await fetch("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: content.trim().slice(0, 60),
+          repoFullName: selectedRepo.full_name,
+          repoOwner: selectedRepo.owner.login,
+          repoName: selectedRepo.name,
+          repoBranch: selectedRepo.default_branch,
+          repoLanguage: selectedRepo.language,
+          repoPrivate: selectedRepo.private,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to create conversation");
+      const conv = await res.json() as Omit<Conversation, "messages">;
+      upsertConversation({ ...conv, messages: [] });
+      setActiveConversation(conv.id);
+      return conv.id;
+    } catch { return ""; }
+  }, [selectedRepo, upsertConversation, setActiveConversation]);
 
   if (hasToken === false) {
     return (
@@ -144,7 +129,7 @@ export default function ChatPage() {
           </div>
           <h2 className="text-base font-semibold text-[var(--foreground)]">GitHub token required</h2>
           <p className="text-sm text-[var(--muted-foreground)] leading-relaxed">
-            To browse repositories and chat, you need to add a GitHub Personal Access Token in Settings.
+            Add a GitHub Personal Access Token in Settings to browse repositories and chat.
           </p>
           <Button asChild className="gap-2">
             <Link href="/dashboard/settings">
@@ -177,9 +162,9 @@ export default function ChatPage() {
       />
 
       <div className="flex-1 flex flex-col min-w-0 min-h-0">
-        {/* Chat header */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--border)] bg-[var(--background)] shrink-0">
-          <div className="flex-1 max-w-lg">
+        {/* Header */}
+        <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 border-b border-[var(--border)] bg-[var(--background)] shrink-0 flex-wrap">
+          <div className="flex-1 min-w-0 max-w-xs sm:max-w-lg">
             <RepoSelector
               repos={allRepos}
               selected={selectedRepo}
@@ -201,9 +186,19 @@ export default function ChatPage() {
                 </span>
               )}
               {selectedRepo.private
-                ? <Lock className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
-                : <Globe className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />}
+                ? <Lock className="h-3.5 w-3.5 text-[var(--muted-foreground)]" aria-label="Private" />
+                : <Globe className="h-3.5 w-3.5 text-[var(--muted-foreground)]" aria-label="Public" />}
             </div>
+          )}
+
+          {/* RAG status badge */}
+          {selectedRepo && (
+            <RagStatus
+              state={ragState}
+              progress={ragProgress}
+              onReindex={reindex}
+              className="shrink-0"
+            />
           )}
 
           <Button
@@ -212,6 +207,7 @@ export default function ChatPage() {
             onClick={handleNewChat}
             disabled={!selectedRepo}
             className="gap-1.5 h-8 text-xs shrink-0"
+            aria-label="Start new conversation"
           >
             <Plus className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">New chat</span>

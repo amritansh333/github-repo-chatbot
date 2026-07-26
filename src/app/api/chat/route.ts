@@ -6,13 +6,12 @@ import { users, userSettings, conversations } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { decryptToken } from "@/lib/encryption";
 import { buildRepoContext } from "@/lib/repo-context";
+import { retrieveRelevantChunks, hasChunks } from "@/lib/rag";
 import type { ChatMessage } from "@/types/chat";
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is not configured.");
-  }
+  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not configured.");
   return new GoogleGenAI({ apiKey });
 }
 
@@ -39,13 +38,11 @@ function validateBody(body: unknown): body is ChatRequestBody {
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
-  // Auth check
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Validate Gemini config
   let ai: GoogleGenAI;
   try {
     ai = getGeminiClient();
@@ -56,7 +53,6 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // Parse + validate body
   let body: unknown;
   try {
     body = await req.json();
@@ -68,27 +64,22 @@ export async function POST(req: NextRequest): Promise<Response> {
     return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
   }
 
-  const {
-    messages,
-    repoOwner,
-    repoName,
-    repoBranch,
-    repoLanguage,
-    conversationId,
-  } = body;
+  const { messages, repoOwner, repoName, repoBranch, repoLanguage, conversationId } = body;
+  const repoFullName = `${repoOwner}/${repoName}`;
+  const userId = session.user.id;
 
-  // Verify the conversation belongs to this user
+  // Verify conversation ownership
   const conv = await db.query.conversations.findFirst({
     where: eq(conversations.id, conversationId),
     columns: { userId: true },
   });
-  if (!conv || conv.userId !== session.user.id) {
+  if (!conv || conv.userId !== userId) {
     return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
   }
 
-  // Fetch encrypted GitHub token from DB
+  // Fetch decrypted GitHub token
   const user = await db.query.users.findFirst({
-    where: eq(users.id, session.user.id),
+    where: eq(users.id, userId),
     columns: { githubAccessToken: true },
   });
 
@@ -109,41 +100,69 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // Fetch user's preferred AI model
+  // Fetch user AI model preference
   const settings = await db.query.userSettings.findFirst({
-    where: eq(userSettings.userId, session.user.id),
+    where: eq(userSettings.userId, userId),
     columns: { aiModel: true },
   });
   const model = settings?.aiModel ?? "gemini-2.5-flash";
 
-  const userMessages = messages.filter(
-    (m) => m.role === "user" || m.role === "assistant"
-  );
+  const userMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const lastUserMessage = [...userMessages].reverse().find((m) => m.role === "user");
 
   if (!lastUserMessage) {
     return NextResponse.json({ error: "No user message found." }, { status: 400 });
   }
 
-  // Build repo context server-side
-  let repoContext: Awaited<ReturnType<typeof buildRepoContext>>;
-  try {
-    repoContext = await buildRepoContext(
-      githubToken,
-      repoOwner,
-      repoName,
-      repoBranch,
-      lastUserMessage.content
-    );
-  } catch (err) {
-    return NextResponse.json(
-      {
-        error: `Failed to load repository context: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      },
-      { status: 502 }
-    );
+  // ── RAG: retrieve semantically relevant chunks ─────────────────────────
+  let ragContext = "";
+  const repoIsIndexed = await hasChunks(userId, repoFullName, repoBranch);
+
+  if (repoIsIndexed) {
+    try {
+      const chunks = await retrieveRelevantChunks(
+        userId,
+        repoFullName,
+        repoBranch,
+        lastUserMessage.content
+      );
+
+      if (chunks.length > 0) {
+        ragContext =
+          "## Semantically Relevant Code Chunks (ranked by relevance)\n\n" +
+          chunks
+            .map(
+              (c, i) =>
+                `### Chunk ${i + 1} — ${c.filePath} (score: ${c.score.toFixed(3)})\n\`\`\`\n${c.content}\n\`\`\``
+            )
+            .join("\n\n");
+      }
+    } catch {
+      // Non-fatal — fall back to file-based context
+    }
+  }
+
+  // ── Fallback: file-based context (used when RAG not indexed yet) ────────
+  let fileContext: Awaited<ReturnType<typeof buildRepoContext>> | null = null;
+  if (!ragContext) {
+    try {
+      fileContext = await buildRepoContext(
+        githubToken,
+        repoOwner,
+        repoName,
+        repoBranch,
+        lastUserMessage.content
+      );
+    } catch (err) {
+      return NextResponse.json(
+        {
+          error: `Failed to load repository context: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        },
+        { status: 502 }
+      );
+    }
   }
 
   const systemInstruction = buildSystemPrompt(
@@ -151,7 +170,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     repoName,
     repoBranch,
     repoLanguage,
-    repoContext
+    ragContext,
+    fileContext
   );
 
   const contents = userMessages.map((m) => ({
@@ -215,33 +235,39 @@ function buildSystemPrompt(
   repo: string,
   branch: string,
   language: string | null,
-  context: Awaited<ReturnType<typeof buildRepoContext>>
+  ragContext: string,
+  fileContext: Awaited<ReturnType<typeof buildRepoContext>> | null
 ): string {
-  const fileBlocks = context.files
-    .map((f) => `### File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
-    .join("\n\n");
+  const repoInfo = `**${owner}/${repo}** (branch: \`${branch}\`${language ? `, primary language: ${language}` : ""})`;
 
-  return `You are RepoChat, an expert AI code assistant. You have been given access to the GitHub repository **${owner}/${repo}** (branch: \`${branch}\`${
-    language ? `, primary language: ${language}` : ""
-  }).
+  const contextSection = ragContext
+    ? ragContext
+    : fileContext
+    ? `## Repository File Tree\n\`\`\`\n${fileContext.tree}\n\`\`\`\n${
+        fileContext.truncated ? "\n*(large repository — showing most relevant files only)*\n" : ""
+      }\n\n## Loaded File Contents\n${
+        fileContext.files
+          .map((f) => `### File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
+          .join("\n\n") || "*(No text files loaded)*"
+      }`
+    : "*(No repository context available)*";
 
-Your role is to help developers understand, navigate, and work with this codebase.
+  const contextMode = ragContext
+    ? "using **semantic RAG retrieval** — the most relevant code chunks have been selected for your question"
+    : "using **file-based heuristics** — run repository indexing for better semantic search";
 
-## Repository File Tree
-\`\`\`
-${context.tree}
-\`\`\`
-${context.truncated ? "\n*(Note: large repository — showing most relevant files only)*\n" : ""}
+  return `You are RepoChat, an expert AI code assistant with deep knowledge of ${repoInfo}.
 
-## Loaded File Contents
-${fileBlocks || "*(No text files loaded for this query)*"}
+Your context was assembled ${contextMode}.
+
+${contextSection}
 
 ## Instructions
 - Answer questions about the repository code, architecture, and structure.
-- Reference specific files and line ranges when relevant.
-- Use markdown formatting: headings, code blocks with language tags, lists, tables.
-- For code examples, always specify the language in fenced code blocks.
-- Be concise but thorough. Prioritize accuracy over length.
-- If you're not sure about something based on the provided files, say so.
+- Reference specific files and line numbers when relevant.
+- Use markdown: headings, fenced code blocks with language tags, lists, tables.
+- Always specify the language in fenced code blocks.
+- Be concise but thorough. Prioritize accuracy.
+- If unsure based on the provided context, say so clearly.
 - Do not invent code that doesn't exist in the repository.`;
 }
