@@ -9,6 +9,7 @@ export interface ChatMessage {
   createdAt: string;
   isStreaming?: boolean;
   error?: boolean;
+  editedAt?: string;
 }
 
 export interface Conversation {
@@ -21,6 +22,7 @@ export interface Conversation {
   repoLanguage: string | null;
   repoPrivate: boolean;
   pinned: boolean;
+  favorited?: boolean;
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;

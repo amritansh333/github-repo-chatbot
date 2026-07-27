@@ -12,32 +12,26 @@ interface UseChatOptions {
 
 async function persistMessages(
   conversationId: string,
-  messagesToSave: Array<{ role: string; content: string }>
+  msgs: Array<{ role: string; content: string }>
 ): Promise<void> {
   try {
     await fetch(`/api/conversations/${conversationId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: messagesToSave }),
+      body: JSON.stringify({ messages: msgs }),
     });
-  } catch {
-    // Non-fatal — messages are already in local state
-  }
+  } catch { /* non-fatal */ }
 }
 
 export function useChat({ conversationId, repo }: UseChatOptions) {
   const {
-    conversations,
-    addMessage,
-    updateMessage,
-    appendMessageContent,
-    deleteMessage,
-    upsertConversation,
+    conversations, addMessage, updateMessage, appendMessageContent,
+    deleteMessage, editMessage, upsertConversation,
   } = useChatStore();
 
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const abortControllerRef = React.useRef<AbortController | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
 
   const conversation = React.useMemo(
     () => conversations.find((c) => c.id === conversationId) ?? null,
@@ -47,66 +41,41 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
   const messages = conversation?.messages ?? [];
 
   const stopStreaming = React.useCallback(() => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
+    abortRef.current?.abort();
+    abortRef.current = null;
     setIsStreaming(false);
-
     if (conversationId) {
-      const conv = useChatStore
-        .getState()
-        .conversations.find((c) => c.id === conversationId);
-      const lastMsg = conv?.messages.findLast((m) => m.isStreaming);
-      if (lastMsg) {
-        updateMessage(conversationId, lastMsg.id, { isStreaming: false });
-      }
+      const conv = useChatStore.getState().conversations.find((c) => c.id === conversationId);
+      const last = conv?.messages.findLast((m) => m.isStreaming);
+      if (last) updateMessage(conversationId, last.id, { isStreaming: false });
     }
   }, [conversationId, updateMessage]);
 
   const sendMessage = React.useCallback(
     async (content: string, retryAssistantId?: string) => {
-      if (!repo || !conversationId) return;
-      if (isStreaming) return;
-
+      if (!repo || !conversationId || isStreaming) return;
       setError(null);
 
-      // Remove old assistant message when retrying
-      if (retryAssistantId) {
-        deleteMessage(conversationId, retryAssistantId);
-      }
+      if (retryAssistantId) deleteMessage(conversationId, retryAssistantId);
 
-      // Add user message optimistically (skip if retrying — reuse existing)
       const userContent = retryAssistantId
-        ? (useChatStore
-            .getState()
-            .conversations.find((c) => c.id === conversationId)
+        ? (useChatStore.getState().conversations.find((c) => c.id === conversationId)
             ?.messages.findLast((m) => m.role === "user")?.content ?? content)
         : content;
 
-      if (!retryAssistantId) {
-        addMessage(conversationId, { role: "user", content });
-      }
+      if (!retryAssistantId) addMessage(conversationId, { role: "user", content });
 
-      // Add placeholder assistant message
-      const assistantId = addMessage(conversationId, {
-        role: "assistant",
-        content: "",
-        isStreaming: true,
-      });
-
+      const assistantId = addMessage(conversationId, { role: "assistant", content: "", isStreaming: true });
       setIsStreaming(true);
 
-      const currentConv = useChatStore
-        .getState()
-        .conversations.find((c) => c.id === conversationId);
-
+      const currentConv = useChatStore.getState().conversations.find((c) => c.id === conversationId);
       const messagesToSend: ChatMessage[] = (currentConv?.messages ?? []).filter(
         (m) => m.id !== assistantId && !m.isStreaming
       );
 
       const controller = new AbortController();
-      abortControllerRef.current = controller;
-
-      let finalAssistantContent = "";
+      abortRef.current = controller;
+      let finalContent = "";
 
       try {
         const res = await fetch("/api/chat", {
@@ -130,7 +99,7 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         }
 
         const reader = res.body?.getReader();
-        if (!reader) throw new Error("No response stream.");
+        if (!reader) throw new Error("No stream.");
 
         const decoder = new TextDecoder();
         let buffer = "";
@@ -138,7 +107,6 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
@@ -147,81 +115,50 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
             if (!line.startsWith("data: ")) continue;
             const raw = line.slice(6).trim();
             if (!raw) continue;
-
             try {
-              const chunk = JSON.parse(raw) as {
-                type: string;
-                content?: string;
-                error?: string;
-              };
+              const chunk = JSON.parse(raw) as { type: string; content?: string; error?: string };
               if (chunk.type === "delta" && chunk.content) {
-                finalAssistantContent += chunk.content;
+                finalContent += chunk.content;
                 appendMessageContent(conversationId, assistantId, chunk.content);
               } else if (chunk.type === "done") {
                 updateMessage(conversationId, assistantId, { isStreaming: false });
               } else if (chunk.type === "error") {
                 throw new Error(chunk.error ?? "AI error");
               }
-            } catch (parseErr) {
-              if (parseErr instanceof SyntaxError) continue;
-              throw parseErr;
+            } catch (pe) {
+              if (pe instanceof SyntaxError) continue;
+              throw pe;
             }
           }
         }
 
         updateMessage(conversationId, assistantId, { isStreaming: false });
 
-        // Persist both messages to DB after successful streaming
         const toSave: Array<{ role: string; content: string }> = [];
-        if (!retryAssistantId) {
-          toSave.push({ role: "user", content: userContent });
-        }
-        if (finalAssistantContent) {
-          toSave.push({ role: "assistant", content: finalAssistantContent });
-        }
-        if (toSave.length > 0) {
-          void persistMessages(conversationId, toSave);
-        }
+        if (!retryAssistantId) toSave.push({ role: "user", content: userContent });
+        if (finalContent) toSave.push({ role: "assistant", content: finalContent });
+        if (toSave.length > 0) void persistMessages(conversationId, toSave);
 
-        // Re-sort conversations so this one bubbles to top
-        const updatedConv = useChatStore
-          .getState()
-          .conversations.find((c) => c.id === conversationId);
-        if (updatedConv) {
-          upsertConversation({ ...updatedConv, updatedAt: new Date().toISOString() });
-        }
+        const updatedConv = useChatStore.getState().conversations.find((c) => c.id === conversationId);
+        if (updatedConv) upsertConversation({ ...updatedConv, updatedAt: new Date().toISOString() });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           updateMessage(conversationId, assistantId, { isStreaming: false });
-          // Persist what we have so far on stop
           const toSave: Array<{ role: string; content: string }> = [];
           if (!retryAssistantId) toSave.push({ role: "user", content: userContent });
-          if (finalAssistantContent) toSave.push({ role: "assistant", content: finalAssistantContent });
+          if (finalContent) toSave.push({ role: "assistant", content: finalContent });
           if (toSave.length > 0) void persistMessages(conversationId, toSave);
           return;
         }
         const msg = err instanceof Error ? err.message : "Unknown error";
         setError(msg);
-        updateMessage(conversationId, assistantId, {
-          isStreaming: false,
-          error: true,
-          content: msg,
-        });
+        updateMessage(conversationId, assistantId, { isStreaming: false, error: true, content: msg });
       } finally {
         setIsStreaming(false);
-        abortControllerRef.current = null;
+        abortRef.current = null;
       }
     },
-    [
-      repo,
-      conversationId,
-      isStreaming,
-      addMessage,
-      updateMessage,
-      appendMessageContent,
-      deleteMessage,
-      upsertConversation,
-    ]
+    [repo, conversationId, isStreaming, addMessage, updateMessage, appendMessageContent, deleteMessage, upsertConversation]
   );
 
   const retryLast = React.useCallback(() => {
@@ -232,6 +169,22 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
     void sendMessage(lastUser.content, lastAssistant.id);
   }, [messages, conversationId, sendMessage]);
 
+  const editAndResend = React.useCallback(
+    (messageId: string, newContent: string) => {
+      if (!conversationId) return;
+      editMessage(conversationId, messageId, newContent);
+      // Remove all messages after the edited one
+      const conv = useChatStore.getState().conversations.find((c) => c.id === conversationId);
+      if (!conv) return;
+      const idx = conv.messages.findIndex((m) => m.id === messageId);
+      if (idx === -1) return;
+      const toRemove = conv.messages.slice(idx + 1);
+      toRemove.forEach((m) => deleteMessage(conversationId, m.id));
+      void sendMessage(newContent);
+    },
+    [conversationId, editMessage, deleteMessage, sendMessage]
+  );
+
   return {
     messages,
     conversation,
@@ -240,6 +193,7 @@ export function useChat({ conversationId, repo }: UseChatOptions) {
     sendMessage,
     stopStreaming,
     retryLast,
+    editAndResend,
     deleteMessage: (id: string) => conversationId && deleteMessage(conversationId, id),
   };
 }

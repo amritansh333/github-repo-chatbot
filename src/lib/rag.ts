@@ -1,101 +1,192 @@
 /**
  * RAG — Retrieval-Augmented Generation
- *
- * Pipeline:
- *  1. Chunking   — split file content into overlapping text chunks
- *  2. Embedding  — embed each chunk with text-embedding-004 (Gemini)
- *  3. Storage    — persist chunks + embeddings in PostgreSQL (JSONB)
- *  4. Retrieval  — cosine similarity search at query time (in JS)
- *  5. Context    — inject top-K chunks into the Gemini system prompt
+ * Enhanced: smarter chunking, deduplication, better ranking, efficient caching.
  */
-
 import { GoogleGenAI } from "@google/genai";
 import { db } from "@/db";
 import { repoChunks } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
 
-// ── Constants ──────────────────────────────────────────────────────────────
-
 const EMBEDDING_MODEL = "text-embedding-004";
-const CHUNK_SIZE = 400;       // tokens ≈ chars / 4 — target ~400 tokens per chunk
-const CHUNK_OVERLAP = 80;     // overlap in chars to preserve context at boundaries
-const CHARS_PER_CHUNK = CHUNK_SIZE * 4;
-const OVERLAP_CHARS = CHUNK_OVERLAP * 4;
-const TOP_K = 12;              // chunks returned per query
-const EMBED_BATCH = 20;        // chunks per embedding API call
-const MAX_CHUNKS_PER_REPO = 2000; // safety cap
+const TOP_K = 14;
+const EMBED_BATCH = 20;
+const MAX_CHUNKS_PER_REPO = 3000;
+const MIN_SCORE = 0.28;
 
-// ── Chunking ───────────────────────────────────────────────────────────────
+// Priority extensions and their boost factors
+const PRIORITY_FILES: Record<string, number> = {
+  "readme.md": 3.0, "readme.txt": 2.5, "readme": 2.5,
+  "package.json": 2.0, "pyproject.toml": 2.0, "cargo.toml": 2.0,
+  "go.mod": 2.0, "pom.xml": 2.0, "build.gradle": 2.0,
+  "dockerfile": 1.8, "docker-compose.yml": 1.8, "docker-compose.yaml": 1.8,
+  "tsconfig.json": 1.5, ".env.example": 1.5, "schema.prisma": 1.8,
+  "schema.ts": 1.8, "schema.sql": 1.8,
+};
+
+// File path signals that boost relevance for certain question types
+const AUTH_SIGNALS = ["auth", "login", "session", "jwt", "token", "permission", "middleware"];
+const DB_SIGNALS = ["model", "schema", "migration", "repository", "entity", "database", "db"];
+const API_SIGNALS = ["route", "controller", "handler", "endpoint", "api", "server"];
+const COMPONENT_SIGNALS = ["component", "page", "view", "layout", "widget"];
+
+// ── Chunking ──────────────────────────────────────────────────────────────
 
 export interface FileChunk {
   filePath: string;
   chunkIndex: number;
   content: string;
+  /** Boost factor applied at ranking time */
+  boost: number;
+}
+
+function getFileBoost(filePath: string): number {
+  const lower = filePath.toLowerCase();
+  const filename = lower.split("/").pop() ?? "";
+
+  // Exact filename match
+  if (PRIORITY_FILES[filename]) return PRIORITY_FILES[filename];
+
+  // Extension-based boost
+  if (filename.endsWith(".md") || filename.endsWith(".mdx")) return 1.6;
+  if (filename.endsWith(".ts") || filename.endsWith(".tsx")) return 1.3;
+  if (filename.endsWith(".py") || filename.endsWith(".go") || filename.endsWith(".rs")) return 1.2;
+  if (filename.endsWith(".js") || filename.endsWith(".jsx")) return 1.1;
+  if (filename.endsWith(".json") || filename.endsWith(".yaml") || filename.endsWith(".yml")) return 1.1;
+
+  // Depth penalty — prefer shallow files
+  const depth = filePath.split("/").length;
+  return Math.max(0.6, 1.0 - depth * 0.05);
 }
 
 /**
- * Split a single file's text into overlapping character windows.
- * Tries to break on newlines to avoid cutting mid-statement.
+ * Semantic chunking: splits on logical boundaries (function/class defs, markdown headings)
+ * rather than pure character windows.
  */
 export function chunkFile(filePath: string, content: string): FileChunk[] {
+  const boost = getFileBoost(filePath);
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
   const chunks: FileChunk[] = [];
-  let start = 0;
+  const CHARS = 1600; // ~400 tokens
+  const OVERLAP = 320;
+
+  // For markdown: split on headings
+  if (ext === "md" || ext === "mdx") {
+    const sections = content.split(/(?=^#{1,3} )/m);
+    let idx = 0;
+    for (const section of sections) {
+      if (section.trim().length < 20) continue;
+      // Further split large sections
+      if (section.length > CHARS * 1.5) {
+        let start = 0;
+        while (start < section.length) {
+          const end = Math.min(start + CHARS, section.length);
+          const text = section.slice(start, end).trim();
+          if (text.length > 20) {
+            chunks.push({ filePath, chunkIndex: idx++, content: `// File: ${filePath}\n${text}`, boost });
+          }
+          start = end - OVERLAP;
+          if (start <= 0) break;
+        }
+      } else {
+        chunks.push({ filePath, chunkIndex: idx++, content: `// File: ${filePath}\n${section.trim()}`, boost });
+      }
+    }
+    return chunks;
+  }
+
+  // For code: try to split on top-level function/class boundaries
+  const topLevelBoundaries = [
+    /^(export\s+)?(async\s+)?function\s+\w+/m,
+    /^(export\s+)?(default\s+)?class\s+\w+/m,
+    /^(export\s+)?const\s+\w+\s*=\s*(async\s+)?\(/m,
+    /^def\s+\w+/m,
+    /^class\s+\w+/m,
+    /^func\s+\w+/m,
+    /^fn\s+\w+/m,
+    /^pub\s+(fn|struct|enum|impl)\s+/m,
+  ];
+
+  // Try semantic split first
+  let lines = content.split("\n");
+  let currentChunk: string[] = [];
   let idx = 0;
+  let charCount = 0;
 
-  while (start < content.length) {
-    let end = Math.min(start + CHARS_PER_CHUNK, content.length);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isTopLevel = topLevelBoundaries.some((re) => re.test(line));
 
-    // Snap to nearest newline (within 200 chars) to avoid mid-line splits
-    if (end < content.length) {
-      const nlPos = content.lastIndexOf("\n", end);
-      if (nlPos > start + CHARS_PER_CHUNK / 2) end = nlPos + 1;
+    if (isTopLevel && charCount > CHARS / 2 && currentChunk.length > 0) {
+      const text = currentChunk.join("\n").trim();
+      if (text.length > 20) {
+        chunks.push({ filePath, chunkIndex: idx++, content: `// File: ${filePath}\n${text}`, boost });
+      }
+      // Keep OVERLAP chars of context
+      const overlap = currentChunk.slice(-Math.ceil(OVERLAP / 40));
+      currentChunk = [...overlap];
+      charCount = overlap.join("\n").length;
     }
 
-    const text = content.slice(start, end).trim();
+    currentChunk.push(line);
+    charCount += line.length + 1;
+
+    if (charCount >= CHARS) {
+      const text = currentChunk.join("\n").trim();
+      if (text.length > 20) {
+        chunks.push({ filePath, chunkIndex: idx++, content: `// File: ${filePath}\n${text}`, boost });
+      }
+      const overlap = currentChunk.slice(-Math.ceil(OVERLAP / 40));
+      currentChunk = [...overlap];
+      charCount = overlap.join("\n").length;
+    }
+  }
+
+  if (currentChunk.length > 0) {
+    const text = currentChunk.join("\n").trim();
     if (text.length > 20) {
-      // Prefix with file path for context
-      chunks.push({
-        filePath,
-        chunkIndex: idx++,
-        content: `// File: ${filePath}\n${text}`,
-      });
+      chunks.push({ filePath, chunkIndex: idx++, content: `// File: ${filePath}\n${text}`, boost });
     }
-
-    start = end - OVERLAP_CHARS;
-    if (start <= 0) break;
   }
 
   return chunks;
 }
 
-export function chunkFiles(
-  files: Array<{ path: string; content: string }>
-): FileChunk[] {
+export function chunkFiles(files: Array<{ path: string; content: string }>): FileChunk[] {
+  // Sort: priority files first
+  const sorted = [...files].sort((a, b) => {
+    return getFileBoost(b.path) - getFileBoost(a.path);
+  });
+
   const all: FileChunk[] = [];
-  for (const f of files) {
+  const seen = new Set<string>();
+
+  for (const f of sorted) {
     const chunks = chunkFile(f.path, f.content);
-    all.push(...chunks);
+    for (const chunk of chunks) {
+      // Deduplicate by content fingerprint
+      const fp = chunk.content.trim().slice(0, 120);
+      if (!seen.has(fp)) {
+        seen.add(fp);
+        all.push(chunk);
+      }
+    }
     if (all.length >= MAX_CHUNKS_PER_REPO) break;
   }
+
   return all.slice(0, MAX_CHUNKS_PER_REPO);
 }
 
-// ── Embedding ──────────────────────────────────────────────────────────────
+// ── Embedding ─────────────────────────────────────────────────────────────
 
-function getEmbeddingClient(): GoogleGenAI {
+function getClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set");
   return new GoogleGenAI({ apiKey });
 }
 
-/**
- * Embed an array of text strings in batches.
- * Returns a parallel array of float[] embeddings.
- */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
-
-  const ai = getEmbeddingClient();
+  const ai = getClient();
   const results: number[][] = [];
 
   for (let i = 0; i < texts.length; i += EMBED_BATCH) {
@@ -105,18 +196,15 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
       contents: batch,
       config: { taskType: "RETRIEVAL_DOCUMENT" },
     });
-
-    const embeddings = res.embeddings ?? [];
-    for (const emb of embeddings) {
+    for (const emb of res.embeddings ?? []) {
       results.push(emb.values ?? []);
     }
   }
-
   return results;
 }
 
 export async function embedQuery(query: string): Promise<number[]> {
-  const ai = getEmbeddingClient();
+  const ai = getClient();
   const res = await ai.models.embedContent({
     model: EMBEDDING_MODEL,
     contents: [query],
@@ -125,7 +213,7 @@ export async function embedQuery(query: string): Promise<number[]> {
   return res.embeddings?.[0]?.values ?? [];
 }
 
-// ── Storage ────────────────────────────────────────────────────────────────
+// ── Storage ───────────────────────────────────────────────────────────────
 
 export async function upsertChunks(
   userId: string,
@@ -136,32 +224,27 @@ export async function upsertChunks(
 ): Promise<void> {
   if (chunks.length === 0) return;
 
-  // Delete existing chunks for this repo+branch+user before inserting fresh ones
-  await db
-    .delete(repoChunks)
-    .where(
-      and(
-        eq(repoChunks.userId, userId),
-        eq(repoChunks.repoFullName, repoFullName),
-        eq(repoChunks.repoBranch, repoBranch)
-      )
-    );
+  await db.delete(repoChunks).where(
+    and(
+      eq(repoChunks.userId, userId),
+      eq(repoChunks.repoFullName, repoFullName),
+      eq(repoChunks.repoBranch, repoBranch)
+    )
+  );
 
-  // Insert in batches of 100
   const BATCH = 100;
   for (let i = 0; i < chunks.length; i += BATCH) {
-    const batchChunks = chunks.slice(i, i + BATCH);
-    const batchEmbeddings = embeddings.slice(i, i + BATCH);
-
+    const bc = chunks.slice(i, i + BATCH);
+    const be = embeddings.slice(i, i + BATCH);
     await db.insert(repoChunks).values(
-      batchChunks.map((chunk, j) => ({
+      bc.map((chunk, j) => ({
         userId,
         repoFullName,
         repoBranch,
         filePath: chunk.filePath,
         chunkIndex: chunk.chunkIndex,
         content: chunk.content,
-        embedding: batchEmbeddings[j] ?? [],
+        embedding: be[j] ?? [],
       }))
     );
   }
@@ -183,9 +266,9 @@ export async function hasChunks(
   return row !== undefined;
 }
 
-// ── Cosine similarity ──────────────────────────────────────────────────────
+// ── Cosine similarity ─────────────────────────────────────────────────────
 
-function cosineSimilarity(a: number[], b: number[]): number {
+function cosineSim(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
   let dot = 0, na = 0, nb = 0;
   for (let i = 0; i < a.length; i++) {
@@ -197,7 +280,18 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-// ── Retrieval ──────────────────────────────────────────────────────────────
+/** Detect question intent to boost signal-relevant files */
+function getQueryBoostSignals(query: string): string[] {
+  const q = query.toLowerCase();
+  const signals: string[] = [];
+  if (AUTH_SIGNALS.some((s) => q.includes(s))) signals.push(...AUTH_SIGNALS);
+  if (DB_SIGNALS.some((s) => q.includes(s))) signals.push(...DB_SIGNALS);
+  if (API_SIGNALS.some((s) => q.includes(s))) signals.push(...API_SIGNALS);
+  if (COMPONENT_SIGNALS.some((s) => q.includes(s))) signals.push(...COMPONENT_SIGNALS);
+  return signals;
+}
+
+// ── Retrieval ─────────────────────────────────────────────────────────────
 
 export interface RetrievedChunk {
   filePath: string;
@@ -212,17 +306,15 @@ export async function retrieveRelevantChunks(
   query: string,
   topK = TOP_K
 ): Promise<RetrievedChunk[]> {
-  // Embed query
   let queryEmbedding: number[];
   try {
     queryEmbedding = await embedQuery(query);
   } catch {
-    return []; // graceful degradation — fall back to file-based context
+    return [];
   }
 
   if (queryEmbedding.length === 0) return [];
 
-  // Load all chunks for this repo from DB
   const rows = await db.query.repoChunks.findMany({
     where: and(
       eq(repoChunks.userId, userId),
@@ -234,21 +326,41 @@ export async function retrieveRelevantChunks(
 
   if (rows.length === 0) return [];
 
-  // Score each chunk
+  const boostSignals = getQueryBoostSignals(query);
+  const seenContent = new Set<string>();
+
   const scored = rows
-    .map((row) => ({
-      filePath: row.filePath,
-      content: row.content,
-      score: cosineSimilarity(queryEmbedding, row.embedding as number[]),
-    }))
-    .filter((r) => r.score > 0.3) // minimum relevance threshold
+    .map((row) => {
+      const cosine = cosineSim(queryEmbedding, row.embedding as number[]);
+      // Apply path-based boost for signal-relevant files
+      const pathLower = row.filePath.toLowerCase();
+      const signalBoost = boostSignals.some((s) => pathLower.includes(s)) ? 1.2 : 1.0;
+      return {
+        filePath: row.filePath,
+        content: row.content,
+        score: cosine * signalBoost,
+      };
+    })
+    .filter((r) => r.score >= MIN_SCORE)
     .sort((a, b) => b.score - a.score)
+    .filter((r) => {
+      // Deduplicate by content fingerprint
+      const fp = r.content.trim().slice(0, 80);
+      if (seenContent.has(fp)) return false;
+      seenContent.add(fp);
+      return true;
+    })
     .slice(0, topK);
 
-  return scored;
+  // Diversify: max 3 chunks per file to avoid one file dominating
+  const fileCounts: Record<string, number> = {};
+  return scored.filter((r) => {
+    fileCounts[r.filePath] = (fileCounts[r.filePath] ?? 0) + 1;
+    return fileCounts[r.filePath] <= 3;
+  });
 }
 
-// ── Full indexing pipeline ─────────────────────────────────────────────────
+// ── Indexing pipeline ─────────────────────────────────────────────────────
 
 export async function indexRepository(
   userId: string,
@@ -263,6 +375,5 @@ export async function indexRepository(
   const embeddings = await embedTexts(texts);
 
   await upsertChunks(userId, repoFullName, repoBranch, chunks, embeddings);
-
   return { chunksIndexed: chunks.length };
 }

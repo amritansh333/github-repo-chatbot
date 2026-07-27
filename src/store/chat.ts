@@ -9,9 +9,9 @@ function generateLocalId(): string {
   return `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function generateTitle(firstMessage: string): string {
-  const trimmed = firstMessage.trim().slice(0, 60);
-  return trimmed.length < firstMessage.trim().length ? `${trimmed}…` : trimmed;
+function generateTitle(msg: string): string {
+  const t = msg.trim().slice(0, 60);
+  return t.length < msg.trim().length ? `${t}…` : t;
 }
 
 function sortByUpdated(convs: Conversation[]): Conversation[] {
@@ -25,10 +25,12 @@ interface ChatState {
   activeConversationId: string | null;
   selectedRepo: GitHubRepo | null;
   sidebarOpen: boolean;
+  sidebarSearch: string;
 
   setSelectedRepo: (repo: GitHubRepo | null) => void;
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
+  setSidebarSearch: (q: string) => void;
 
   setConversations: (conversations: Conversation[]) => void;
   setActiveConversation: (id: string | null) => void;
@@ -39,6 +41,7 @@ interface ChatState {
   updateMessage: (conversationId: string, messageId: string, updates: Partial<ChatMessage>) => void;
   appendMessageContent: (conversationId: string, messageId: string, delta: string) => void;
   deleteMessage: (conversationId: string, messageId: string) => void;
+  editMessage: (conversationId: string, messageId: string, content: string) => void;
 
   getActiveConversation: () => Conversation | null;
 }
@@ -50,10 +53,12 @@ export const useChatStore = create<ChatState>()(
       activeConversationId: null,
       selectedRepo: null,
       sidebarOpen: true,
+      sidebarSearch: "",
 
       setSelectedRepo: (repo) => set({ selectedRepo: repo }),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+      setSidebarSearch: (q) => set({ sidebarSearch: q }),
 
       setConversations: (conversations) =>
         set({ conversations: sortByUpdated(conversations) }),
@@ -72,11 +77,11 @@ export const useChatStore = create<ChatState>()(
       removeConversation: (id) =>
         set((s) => {
           const filtered = s.conversations.filter((c) => c.id !== id);
-          const newActive =
-            s.activeConversationId === id
-              ? (filtered[0]?.id ?? null)
-              : s.activeConversationId;
-          return { conversations: filtered, activeConversationId: newActive };
+          return {
+            conversations: filtered,
+            activeConversationId:
+              s.activeConversationId === id ? (filtered[0]?.id ?? null) : s.activeConversationId,
+          };
         }),
 
       addMessage: (conversationId, message) => {
@@ -139,6 +144,22 @@ export const useChatStore = create<ChatState>()(
                   ...c,
                   messages: c.messages.filter((m) => m.id !== messageId),
                   updatedAt: new Date().toISOString(),
+                }
+              : c
+          ),
+        })),
+
+      editMessage: (conversationId, messageId, content) =>
+        set((s) => ({
+          conversations: s.conversations.map((c) =>
+            c.id === conversationId
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === messageId
+                      ? { ...m, content, editedAt: new Date().toISOString() }
+                      : m
+                  ),
                 }
               : c
           ),
