@@ -1,56 +1,59 @@
-# GitHub Repository Chatbot
+# RepoChat
 
-An AI-powered GitHub repository assistant that helps developers explore, understand, and interact with their repositories through a clean, modern interface. The application connects securely to GitHub using a Personal Access Token (PAT), provides repository insights, and lays the foundation for AI-powered code understanding and repository conversations.
+An AI-powered GitHub repository assistant that helps developers explore, understand, and chat with their repositories using Retrieval-Augmented Generation (RAG). RepoChat combines GitHub integration, Google Gemini AI, semantic search, and persistent conversations to provide contextual answers about your codebase.
 
-> **Status:** Active Development
+> Built with Next.js, TypeScript, Auth.js, PostgreSQL, Drizzle ORM, and Google Gemini.
 
 ---
 
 ## Features
 
-### GitHub Authentication
+### AI-Powered Repository Chat
 
-- Secure Personal Access Token (PAT) authentication
-- Token validation before access
-- Persistent session using local storage
-- Quick sign-out support
+- Chat with GitHub repositories using Google Gemini
+- Retrieval-Augmented Generation (RAG)
+- Semantic code search
+- Repository context retrieval
+- Streaming AI responses
+- Markdown and code block rendering
 
-### Repository Management
+### GitHub Integration
 
-- Fetch repositories directly from GitHub
-- Search repositories instantly
-- Sort by name and last updated
-- Repository overview with metadata
-- Repository detail page
-- Public and private repository support
+- Sign in with GitHub
+- Browse public and private repositories
+- Repository details and insights
+- Repository language analysis
+- Recent commits and branches
 
-### Dashboard
+### Conversation Management
 
-- Repository statistics
-- Recently updated repositories
-- Language distribution overview
-- Repository activity summary
-- Clean and responsive analytics cards
+- Multiple chat conversations
+- Rename and delete chats
+- Persistent chat history
+- Conversation search
+- Pin and favorite conversations
+- Export conversations as Markdown or JSON
 
 ### User Experience
 
-- Modern responsive interface
+- Responsive design
 - Light and Dark mode
-- Mobile-friendly navigation
-- Smooth page transitions
 - Loading skeletons
-- Empty states
-- Error handling
-- Accessible components
+- Toast notifications
+- Auto-scroll
+- Copy code blocks
+- Retry AI responses
+- Keyboard accessibility
 
-### Developer Experience
+### Performance & Security
 
-- TypeScript
-- Modular architecture
-- Reusable UI components
-- Clean folder structure
-- Strict typing
-- Scalable codebase
+- PostgreSQL with Drizzle ORM
+- Authentication with Auth.js
+- Environment validation
+- API validation
+- Rate limiting
+- Security headers
+- SEO optimization
 
 ---
 
@@ -58,20 +61,28 @@ An AI-powered GitHub repository assistant that helps developers explore, underst
 
 ### Frontend
 
-- Next.js 16 (App Router)
+- Next.js 16
 - React 19
 - TypeScript
-- Tailwind CSS v4
+- Tailwind CSS
 - shadcn/ui
 - Radix UI
-- Lucide React
 - Zustand
-- next-themes
-- date-fns
 
-### APIs
+### Backend
 
-- GitHub REST API
+- Next.js API Routes
+- Auth.js
+- Drizzle ORM
+- PostgreSQL
+
+### AI & Search
+
+- Google Gemini
+- Retrieval-Augmented Generation (RAG)
+- Embeddings
+- Semantic Search
+- Vector Storage
 
 ---
 
@@ -80,14 +91,14 @@ An AI-powered GitHub repository assistant that helps developers explore, underst
 ```text
 src
 ├── app
-│   ├── dashboard
-│   └── ...
 ├── components
 │   ├── auth
+│   ├── chat
 │   ├── github
 │   ├── layout
 │   ├── providers
 │   └── ui
+├── db
 ├── hooks
 ├── lib
 ├── store
@@ -102,9 +113,6 @@ src
 
 ```bash
 git clone https://github.com/your-username/github-repo-chatbot.git
-```
-
-```bash
 cd github-repo-chatbot
 ```
 
@@ -116,10 +124,24 @@ npm install
 
 ### Configure environment
 
-Create a `.env.local` file.
+Create a `.env` file and add the required environment variables.
 
 ```env
-# Add environment variables here as the project evolves.
+DATABASE_URL=
+
+AUTH_SECRET=
+AUTH_GITHUB_ID=
+AUTH_GITHUB_SECRET=
+AUTH_GOOGLE_ID=
+AUTH_GOOGLE_SECRET=
+
+GEMINI_API_KEY=
+```
+
+### Push the database schema
+
+```bash
+npm run db:push
 ```
 
 ### Run the development server
@@ -136,22 +158,6 @@ http://localhost:3000
 
 ---
 
-## GitHub Personal Access Token
-
-This project requires a GitHub Personal Access Token.
-
-### Create a token
-
-1. Open GitHub Settings.
-2. Navigate to **Developer Settings → Personal Access Tokens**.
-3. Generate a fine-grained or classic token.
-4. Grant read access to repositories.
-5. Paste the token into the application.
-
-The token is stored locally in your browser and is never committed to the repository.
-
----
-
 ## Available Scripts
 
 ```bash
@@ -164,7 +170,7 @@ Start the development server.
 npm run build
 ```
 
-Build the application for production.
+Build the application.
 
 ```bash
 npm run start
@@ -178,26 +184,27 @@ npm run lint
 
 Run ESLint.
 
+```bash
+npm run db:push
+```
+
+Push the database schema.
+
 ---
 
-## Roadmap
+## Future Improvements
 
-- AI-powered repository chat
-- Semantic code search
-- Repository indexing
-- Chat history
-- Markdown rendering
-- Streaming AI responses
-- Code explanation
-- Repository insights
-- Multi-repository support
-- Deployment-ready production build
+- Multi-repository chat
+- Repository indexing optimization
+- Organization support
+- AI conversation sharing
+- Team collaboration
 
 ---
 
 ## Contributing
 
-Contributions, suggestions, and issue reports are always welcome. If you'd like to improve the project, feel free to open an issue or submit a pull request.
+Contributions, suggestions, and pull requests are welcome.
 
 ---
 
