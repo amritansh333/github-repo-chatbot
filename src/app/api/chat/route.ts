@@ -7,6 +7,8 @@ import { eq } from "drizzle-orm";
 import { decryptToken } from "@/lib/encryption";
 import { buildRepoContext } from "@/lib/repo-context";
 import { retrieveRelevantChunks, hasChunks } from "@/lib/rag";
+import { rateLimit, getIdentifier } from "@/lib/rate-limit";
+import { API } from "@/lib/api";
 import type { ChatMessage } from "@/types/chat";
 
 function getGeminiClient(): GoogleGenAI {
@@ -15,7 +17,7 @@ function getGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({ apiKey });
 }
 
-export interface ChatRequestBody {
+interface ChatRequestBody {
   messages: ChatMessage[];
   repoOwner: string;
   repoName: string;
@@ -39,49 +41,43 @@ function validateBody(body: unknown): body is ChatRequestBody {
 
 export async function POST(req: NextRequest): Promise<Response> {
   const session = await auth();
-  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session?.user?.id) return API.unauthorized();
+
+  // Rate limit: 30 chat requests per minute per user
+  const rl = rateLimit(getIdentifier(req, session.user.id), { limit: 30, windowMs: 60_000 });
+  if (!rl.success) return API.tooManyRequests(rl.resetAt);
 
   let ai: GoogleGenAI;
   try { ai = getGeminiClient(); }
-  catch { return NextResponse.json({ error: "AI not configured. Set GEMINI_API_KEY." }, { status: 503 }); }
+  catch { return API.serviceUnavailable("AI not configured. Set GEMINI_API_KEY."); }
 
   let body: unknown;
   try { body = await req.json(); }
-  catch { return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }); }
+  catch { return API.badRequest("Invalid JSON body."); }
 
-  if (!validateBody(body)) return NextResponse.json({ error: "Missing required fields." }, { status: 400 });
+  if (!validateBody(body)) return API.badRequest("Missing required fields.");
 
   const { messages, repoOwner, repoName, repoBranch, repoLanguage, conversationId } = body;
   const repoFullName = `${repoOwner}/${repoName}`;
   const userId = session.user.id;
 
-  const conv = await db.query.conversations.findFirst({
-    where: eq(conversations.id, conversationId),
-    columns: { userId: true },
-  });
-  if (!conv || conv.userId !== userId) return NextResponse.json({ error: "Not found." }, { status: 404 });
+  const [conv, user, settings] = await Promise.all([
+    db.query.conversations.findFirst({ where: eq(conversations.id, conversationId), columns: { userId: true } }),
+    db.query.users.findFirst({ where: eq(users.id, userId), columns: { githubAccessToken: true } }),
+    db.query.userSettings.findFirst({ where: eq(userSettings.userId, userId), columns: { aiModel: true } }),
+  ]);
 
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, userId),
-    columns: { githubAccessToken: true },
-  });
-  if (!user?.githubAccessToken) {
-    return NextResponse.json({ error: "No GitHub token. Add it in Settings." }, { status: 422 });
-  }
+  if (!conv || conv.userId !== userId) return API.notFound("Conversation");
+  if (!user?.githubAccessToken) return NextResponse.json({ error: "No GitHub token. Add it in Settings." }, { status: 422 });
 
   let githubToken: string;
   try { githubToken = await decryptToken(user.githubAccessToken); }
-  catch { return NextResponse.json({ error: "Failed to decrypt GitHub token." }, { status: 500 }); }
+  catch { return API.internalError("Failed to decrypt GitHub token."); }
 
-  const settings = await db.query.userSettings.findFirst({
-    where: eq(userSettings.userId, userId),
-    columns: { aiModel: true },
-  });
   const model = settings?.aiModel ?? "gemini-2.5-flash";
-
   const userMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const lastUserMessage = [...userMessages].reverse().find((m) => m.role === "user");
-  if (!lastUserMessage) return NextResponse.json({ error: "No user message found." }, { status: 400 });
+  if (!lastUserMessage) return API.badRequest("No user message found.");
 
   // RAG retrieval
   let ragContext = "";
@@ -92,14 +88,12 @@ export async function POST(req: NextRequest): Promise<Response> {
       const chunks = await retrieveRelevantChunks(userId, repoFullName, repoBranch, lastUserMessage.content);
       if (chunks.length > 0) {
         ragContext =
-          "## Semantically Retrieved Code (ranked by relevance to your question)\n\n" +
-          chunks
-            .map((c, i) =>
-              `### [${i + 1}] ${c.filePath} — relevance: ${(c.score * 100).toFixed(0)}%\n\`\`\`\n${c.content}\n\`\`\``
-            )
-            .join("\n\n");
+          "## Semantically Retrieved Code (ranked by relevance)\n\n" +
+          chunks.map((c, i) =>
+            `### [${i + 1}] ${c.filePath} — relevance: ${(c.score * 100).toFixed(0)}%\n\`\`\`\n${c.content}\n\`\`\``
+          ).join("\n\n");
       }
-    } catch { /* fall through to file context */ }
+    } catch { /* fall through */ }
   }
 
   let fileContext: Awaited<ReturnType<typeof buildRepoContext>> | null = null;
@@ -115,7 +109,6 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   const systemInstruction = buildSystemPrompt(repoOwner, repoName, repoBranch, repoLanguage, ragContext, fileContext);
-
   const contents = userMessages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
@@ -160,13 +153,10 @@ function buildSystemPrompt(
   const contextMode = ragContext
     ? "🔍 **Semantic RAG** — top-ranked chunks retrieved for your specific question"
     : "📂 **File heuristics** — run indexing for better semantic search";
-
   const contextBody = ragContext
     ? ragContext
     : fileContext
-    ? `## Repository File Tree\n\`\`\`\n${fileContext.tree}\n\`\`\`\n${fileContext.truncated ? "\n> ⚠️ Large repo — showing most relevant files only\n" : ""}\n\n## File Contents\n${
-        fileContext.files.map((f) => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join("\n\n") || "*(No files loaded)*"
-      }`
+    ? `## Repository File Tree\n\`\`\`\n${fileContext.tree}\n\`\`\`\n${fileContext.truncated ? "\n> ⚠️ Large repo — showing most relevant files only\n" : ""}\n\n## File Contents\n${fileContext.files.map((f) => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``).join("\n\n") || "*(No files loaded)*"}`
     : "*(No context available)*";
 
   return `You are **RepoChat**, an expert AI code assistant for ${repoInfo}.
@@ -179,27 +169,16 @@ ${contextBody}
 
 ## How to answer
 
-**For architecture questions:**
-- Give a high-level overview first, then drill down
-- Reference specific files and directories
-- Explain data flow and component relationships
-- Use diagrams in text form when helpful (e.g. ASCII tree)
+**For architecture questions:** Give a high-level overview first, then drill down. Reference specific files and directories. Explain data flow and component relationships.
 
-**For code questions:**
-- Always show the relevant file path above code blocks
-- Explain what the code does and why
-- Highlight any patterns, gotchas, or important details
-- If multiple approaches exist, compare them
+**For code questions:** Show the relevant file path above code blocks. Explain what the code does and why. Highlight patterns, gotchas, or important details.
 
-**For "find X" questions:**
-- State exactly where X is located (file + line hint)
-- Explain how it works
-- Show the key code excerpt
+**For "find X" questions:** State exactly where X is located (file + approximate line). Explain how it works. Show the key code excerpt.
 
 **Formatting rules:**
 - Use \`\`\`language fenced blocks with correct language tag
 - Use **bold** for file paths and key terms
 - Use headings to structure long answers
-- Keep answers focused — don't pad with filler text
-- If unsure, say so. Never invent code that doesn't exist.`;
+- Be focused and concise — no filler
+- If unsure, say so clearly. Never invent code.`;
 }

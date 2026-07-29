@@ -1,8 +1,3 @@
-/**
- * POST /api/rag
- * Triggers on-demand indexing of a repository.
- * Called by the client before the first chat message if no chunks exist.
- */
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "../../../../auth";
 import { db } from "@/db";
@@ -11,6 +6,8 @@ import { eq } from "drizzle-orm";
 import { decryptToken } from "@/lib/encryption";
 import { fetchRepoTree, fetchFileContent } from "@/lib/repo-context";
 import { indexRepository, hasChunks } from "@/lib/rag";
+import { rateLimit, getIdentifier } from "@/lib/rate-limit";
+import { API } from "@/lib/api";
 
 interface RAGRequestBody {
   repoOwner: string;
@@ -33,50 +30,36 @@ function validate(body: unknown): body is RAGRequestBody {
 
 export async function POST(req: NextRequest): Promise<Response> {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return API.unauthorized();
+
+  // Rate limit indexing: 5 per minute (expensive operation)
+  const rl = rateLimit(getIdentifier(req, session.user.id), { limit: 5, windowMs: 60_000 });
+  if (!rl.success) return API.tooManyRequests(rl.resetAt);
 
   let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
+  try { body = await req.json(); }
+  catch { return API.badRequest("Invalid body"); }
 
-  if (!validate(body)) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-  }
+  if (!validate(body)) return API.badRequest("Missing required fields");
 
   const { repoOwner, repoName, repoFullName, repoBranch, force = false } = body;
   const userId = session.user.id;
 
-  // Skip if already indexed (unless forced)
   if (!force) {
     const already = await hasChunks(userId, repoFullName, repoBranch);
-    if (already) {
-      return NextResponse.json({ status: "already_indexed" });
-    }
+    if (already) return NextResponse.json({ status: "already_indexed" });
   }
 
-  // Get GitHub token
   const user = await db.query.users.findFirst({
     where: eq(users.id, userId),
     columns: { githubAccessToken: true },
   });
-
-  if (!user?.githubAccessToken) {
-    return NextResponse.json({ error: "No GitHub token" }, { status: 422 });
-  }
+  if (!user?.githubAccessToken) return NextResponse.json({ error: "No GitHub token" }, { status: 422 });
 
   let githubToken: string;
-  try {
-    githubToken = await decryptToken(user.githubAccessToken);
-  } catch {
-    return NextResponse.json({ error: "Failed to decrypt token" }, { status: 500 });
-  }
+  try { githubToken = await decryptToken(user.githubAccessToken); }
+  catch { return API.internalError("Failed to decrypt token"); }
 
-  // Fetch repo tree
   let tree: Awaited<ReturnType<typeof fetchRepoTree>>;
   try {
     tree = await fetchRepoTree(githubToken, repoOwner, repoName, repoBranch);
@@ -87,14 +70,12 @@ export async function POST(req: NextRequest): Promise<Response> {
     );
   }
 
-  // Fetch text file contents (limit to 150 files to keep indexing fast)
   const blobs = tree.filter((item) => item.type === "blob").slice(0, 150);
-  const files: Array<{ path: string; content: string }> = [];
-
   const fileResults = await Promise.allSettled(
     blobs.map((item) => fetchFileContent(githubToken, repoOwner, repoName, item.path))
   );
 
+  const files: Array<{ path: string; content: string }> = [];
   for (let i = 0; i < blobs.length; i++) {
     const result = fileResults[i];
     if (result.status === "fulfilled" && result.value) {
@@ -102,18 +83,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
   }
 
-  if (files.length === 0) {
-    return NextResponse.json({ status: "no_text_files", chunksIndexed: 0 });
-  }
+  if (files.length === 0) return NextResponse.json({ status: "no_text_files", chunksIndexed: 0 });
 
-  // Index
   try {
-    const { chunksIndexed } = await indexRepository(
-      userId,
-      repoFullName,
-      repoBranch,
-      files
-    );
+    const { chunksIndexed } = await indexRepository(userId, repoFullName, repoBranch, files);
     return NextResponse.json({ status: "indexed", chunksIndexed, filesIndexed: files.length });
   } catch (err) {
     return NextResponse.json(
@@ -125,17 +98,13 @@ export async function POST(req: NextRequest): Promise<Response> {
 
 export async function GET(req: NextRequest): Promise<Response> {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return API.unauthorized();
 
   const url = new URL(req.url);
   const repoFullName = url.searchParams.get("repo");
   const repoBranch = url.searchParams.get("branch") ?? "main";
 
-  if (!repoFullName) {
-    return NextResponse.json({ error: "repo param required" }, { status: 400 });
-  }
+  if (!repoFullName) return API.badRequest("repo param required");
 
   const indexed = await hasChunks(session.user.id, repoFullName, repoBranch);
   return NextResponse.json({ indexed });
